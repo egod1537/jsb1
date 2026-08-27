@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+backend/.venv/
+*.egg-info/
+
+# Node
+node_modules/
+frontend/dist/
+frontend/coverage/
+frontend/*.js
+frontend/*.d.ts
+*.tsbuildinfo
+
+# Runtime data (directory structure is retained)
+data/jsb1.db*
+data/runs/*
+!data/runs/.gitkeep
+
+# Local configuration
+.env
+.DS_Store
+*.log
