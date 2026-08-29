@@ -2,6 +2,7 @@ from fastapi import Request
 
 from app.analysis.mcap_reader import McapRunReader
 from app.config.settings import Settings
+from app.domain.build_info import BuildInfo
 from app.repositories.database import Database
 from app.repositories.runs import RunRepository
 from app.repositories.builds import BuildRepository
@@ -75,3 +76,7 @@ def get_artifact_service(request: Request) -> ArtifactService:
 
 def get_app_settings(request: Request) -> Settings:
     return request.app.state.settings
+
+
+def get_build_info(request: Request) -> BuildInfo:
+    return request.app.state.build_info

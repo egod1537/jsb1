@@ -1,3 +1,9 @@
+x-jsb1-logging: &jsb1-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   backend:
     build:
@@ -25,6 +31,7 @@ services:
       timeout: 3s
       retries: 10
       start_period: 10s
+    logging: *jsb1-logging
     restart: unless-stopped
 
   web:
@@ -36,6 +43,7 @@ services:
         condition: service_healthy
     ports:
       - "${JSB1_HTTP_PORT:-8081}:8080"
+    logging: *jsb1-logging
     restart: unless-stopped
 
   tunnel:
@@ -52,5 +60,6 @@ services:
     volumes:
       - /Users/yang/.cloudflared/jsb1.yml:/etc/cloudflared/config.yml:ro
       - /Users/yang/.cloudflared/766384e2-2163-4171-a021-aa6368851c9d.json:/etc/cloudflared/credentials.json:ro
+    logging: *jsb1-logging
     restart: unless-stopped
     profiles: [legacy-tunnel]

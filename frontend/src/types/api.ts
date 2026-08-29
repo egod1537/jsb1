@@ -132,3 +132,11 @@ export interface Deployment {
   updated_at: string;
   error_message: string | null;
 }
+
+export interface BuildVersion {
+  branch: string;
+  commit: string;
+  short_commit: string;
+  built_at: string;
+  hostname: string | null;
+}

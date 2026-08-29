@@ -1,3 +1,15 @@
+import {
+  Button,
+  Callout,
+  Dialog,
+  DialogBody,
+  DialogFooter,
+  FormGroup,
+  HTMLSelect,
+  InputGroup,
+  Intent,
+} from "@blueprintjs/core";
+import { IconNames } from "@blueprintjs/icons";
 import { FormEvent, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api/client";
@@ -44,54 +56,47 @@ export function NewRunForm({ onClose, initialBuildId }: { onClose: () => void; i
   }
 
   return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
-      <form className="new-run" onSubmit={submit} onMouseDown={(event) => event.stopPropagation()}>
-        <div className="section-heading">
-          <div>
-            <span className="eyebrow">Simulation queue</span>
-            <h2>New run</h2>
-          </div>
-          <button type="button" className="icon-button" onClick={onClose} aria-label="Close">×</button>
-        </div>
-        <label>
-          Scenario
-          <select value={scenario} onChange={(event) => setScenario(event.target.value)} required>
+    <Dialog className="console-dialog" icon={IconNames.AIRPLANE} isOpen onClose={onClose} title="New simulation run">
+      <form onSubmit={submit}>
+        <DialogBody>
+          <p className="dialog-intro">Queue an immutable scenario/autopilot combination for the regression runner.</p>
+          <FormGroup label="Scenario" labelFor="run-scenario">
+            <HTMLSelect id="run-scenario" fill value={scenario} onChange={(event) => setScenario(event.currentTarget.value)} required>
             {scenarios.map((item) => <option key={item}>{item}</option>)}
-          </select>
-        </label>
-        {scenarios.length === 0 && !error && <p className="muted">No YAML scenarios were found.</p>}
-        <label>
-          Autopilot
-          <select value={autopilot} onChange={(event) => setAutopilot(event.target.value)} required>
+            </HTMLSelect>
+          </FormGroup>
+          {scenarios.length === 0 && !error && <Callout compact>No YAML scenarios were found.</Callout>}
+          <FormGroup label="Autopilot" labelFor="run-autopilot">
+            <HTMLSelect id="run-autopilot" fill value={autopilot} onChange={(event) => setAutopilot(event.currentTarget.value)} required>
             {autopilots.map((item) => <option key={item}>{item}</option>)}
-          </select>
-        </label>
-        <label>
-          Completed build
-          <select value={buildId} onChange={(event) => setBuildId(event.target.value)}>
-            <option value="">Legacy configured runner</option>
-            {builds.map((build) => <option key={build.id} value={build.id}>
-              #{build.id} · {build.repository_name} · {build.branch ?? build.commit_sha.slice(0, 10)}
-            </option>)}
-          </select>
-        </label>
-        {!buildId && <label>
-          Commit SHA (optional legacy metadata)
-          <input
-            value={commitSha}
-            onChange={(event) => setCommitSha(event.target.value)}
-            placeholder="abc1234"
-            pattern="[0-9a-fA-F]+"
-          />
-        </label>}
-        {error && <p className="form-error" role="alert">{error}</p>}
-        <div className="form-actions">
-          <button type="button" className="button button--quiet" onClick={onClose}>Cancel</button>
-          <button className="button" disabled={submitting || !scenario || !autopilot}>
-            {submitting ? "Queuing…" : "Run simulation"}
-          </button>
-        </div>
+            </HTMLSelect>
+          </FormGroup>
+          <FormGroup label="Completed build" labelFor="run-build">
+            <HTMLSelect id="run-build" fill value={buildId} onChange={(event) => setBuildId(event.currentTarget.value)}>
+              <option value="">Legacy configured runner</option>
+              {builds.map((build) => <option key={build.id} value={build.id}>
+                #{build.id} · {build.repository_name} · {build.branch ?? build.commit_sha.slice(0, 10)}
+              </option>)}
+            </HTMLSelect>
+          </FormGroup>
+          {!buildId && <FormGroup label="Commit SHA" labelFor="run-commit" helperText="Optional legacy metadata">
+            <InputGroup
+              id="run-commit"
+              value={commitSha}
+              onChange={(event) => setCommitSha(event.currentTarget.value)}
+              placeholder="abc1234"
+              pattern="[0-9a-fA-F]+"
+            />
+          </FormGroup>}
+          {error && <Callout compact intent={Intent.DANGER} role="alert">{error}</Callout>}
+        </DialogBody>
+        <DialogFooter actions={<>
+          <Button type="button" onClick={onClose}>Cancel</Button>
+          <Button intent={Intent.PRIMARY} loading={submitting} type="submit" disabled={!scenario || !autopilot}>
+            Run simulation
+          </Button>
+        </>} />
       </form>
-    </div>
+    </Dialog>
   );
 }

@@ -1,6 +1,8 @@
+import { FormGroup, HTMLSelect, HTMLTable } from "@blueprintjs/core";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
 import { ErrorPanel, Loading } from "../components/Loading";
+import { PageHeader } from "../components/PageHeader";
 import { TimeSeriesChart } from "../components/TimeSeriesChart";
 import { useRuns } from "../features/runs/useRunData";
 import type { RunDetail, SignalResponse } from "../types/api";
@@ -36,20 +38,20 @@ export function ComparePage() {
   }, [details]);
 
   return <main>
-    <div className="page-heading"><div><span className="eyebrow">A/B inspection</span><h1>Compare runs</h1><p>Overlay matching scenarios and inspect metric deltas.</p></div></div>
+    <PageHeader eyebrow="A/B inspection" title="Compare runs" description="Overlay matching scenarios and inspect metric deltas." />
     {runs.loading && <Loading label="Loading completed runs" />}
     {runs.error && <ErrorPanel message={runs.error} />}
-    {runs.data && <section className="compare-picker">
-      <label>Run A<select value={a ?? ""} onChange={(event) => { setA(Number(event.target.value) || null); setB(null); }}><option value="">Select a run</option>{completed.map((run) => <option key={run.id} value={run.id}>#{run.id} · {run.scenario_name} · {run.commit_sha?.slice(0, 10) ?? "legacy"}</option>)}</select></label>
+    {runs.data && <section className="compare-picker" aria-label="Run selection">
+      <FormGroup label="Run A" labelFor="compare-run-a"><HTMLSelect id="compare-run-a" fill value={a ?? ""} onChange={(event) => { setA(Number(event.currentTarget.value) || null); setB(null); }}><option value="">Select a run</option>{completed.map((run) => <option key={run.id} value={run.id}>#{run.id} · {run.scenario_name} · {run.commit_sha?.slice(0, 10) ?? "legacy"}</option>)}</HTMLSelect></FormGroup>
       <span>versus</span>
-      <label>Run B<select value={b ?? ""} disabled={!a} onChange={(event) => setB(Number(event.target.value) || null)}><option value="">Select a matching run</option>{candidatesB.map((run) => <option key={run.id} value={run.id}>#{run.id} · {run.commit_sha?.slice(0, 10) ?? "legacy"}</option>)}</select></label>
+      <FormGroup label="Run B" labelFor="compare-run-b"><HTMLSelect id="compare-run-b" fill value={b ?? ""} disabled={!a} onChange={(event) => setB(Number(event.currentTarget.value) || null)}><option value="">Select a matching run</option>{candidatesB.map((run) => <option key={run.id} value={run.id}>#{run.id} · {run.commit_sha?.slice(0, 10) ?? "legacy"}</option>)}</HTMLSelect></FormGroup>
     </section>}
     {error && <ErrorPanel message={error} />}
     {a && b && !details && !error && <Loading label="Building comparison" />}
-    {details && <div className="table-shell compare-table"><table><thead><tr><th>Metric</th><th>Run #{details[0].run.id}</th><th>Run #{details[1].run.id}</th><th>Delta (B − A)</th></tr></thead><tbody>{metricRows.map((row) => {
+    {details && <div className="table-shell compare-table"><HTMLTable compact interactive striped><thead><tr><th>Metric</th><th>Run #{details[0].run.id}</th><th>Run #{details[1].run.id}</th><th>Delta (B − A)</th></tr></thead><tbody>{metricRows.map((row) => {
       const av = row.a?.value; const bv = row.b?.value; const delta = av != null && bv != null ? bv - av : null; const unit = row.a?.unit ?? row.b?.unit ?? "";
-      return <tr key={row.name}><td>{row.name}</td><td>{av == null ? "—" : `${av.toFixed(3)} ${unit}`}</td><td>{bv == null ? "—" : `${bv.toFixed(3)} ${unit}`}</td><td className={delta == null ? "" : delta > 0 ? "delta-up" : "delta-down"}>{delta == null ? "—" : `${delta > 0 ? "+" : ""}${delta.toFixed(3)} ${unit}`}</td></tr>;
-    })}</tbody></table></div>}
+      return <tr key={row.name}><td>{row.name}</td><td className="technical-value">{av == null ? "—" : `${av.toFixed(3)} ${unit}`}</td><td className="technical-value">{bv == null ? "—" : `${bv.toFixed(3)} ${unit}`}</td><td className={`technical-value ${delta == null ? "" : delta > 0 ? "delta-up" : "delta-down"}`}>{delta == null ? "—" : `${delta > 0 ? "+" : ""}${delta.toFixed(3)} ${unit}`}</td></tr>;
+    })}</tbody></HTMLTable></div>}
     {details && signals && <section className="plots"><TimeSeriesChart title="Roll tracking overlay" unit="deg" series={[
       { name: "Commanded", time: signals[0].time, values: signals[0].series.commanded_roll, color: "#f2bd52", dashed: true },
       { name: `Run #${details[0].run.id}`, time: signals[0].time, values: signals[0].series.roll, color: "#21c8b5" },

@@ -40,6 +40,7 @@ acquire_lock "$slug"
 validate_tls_files
 export_compose_values "$unit_dir"
 project="$(unit_value "$unit_dir" project)"
+hostname="$(unit_value "$unit_dir" hostname)"
 route_path="$ROUTES_DIR/$slug.caddy"
 route_backup=""
 if [[ -f "$route_path" ]]; then
@@ -53,7 +54,7 @@ if [[ -f "$route_path" ]]; then
 fi
 
 docker compose -p "$project" -f "$DEPLOY_COMPOSE" down --remove-orphans
-delete_cloudflare_dns_route "$unit_dir" "$(unit_value "$unit_dir" hostname)"
+delete_cloudflare_dns_route "$unit_dir" "$hostname"
 rm -f "$route_backup"
 worktree="$(unit_value "$unit_dir" worktree 2>/dev/null || true)"
 if [[ -n "$worktree" && "$worktree" == "$WORKTREES_DIR/$slug/"* && -e "$worktree/.git" ]]; then
@@ -62,4 +63,6 @@ if [[ -n "$worktree" && "$worktree" == "$WORKTREES_DIR/$slug/"* && -e "$worktree
 fi
 rm -f "$unit_dir/port"
 atomic_value "$unit_dir" status stopped
+github_mark_environment_inactive "$unit_dir" \
+  || die "GitHub deployment reporting is required but inactive status failed"
 printf 'Undeployed %s (data retained in %s).\n' "$branch" "$unit_dir/data"

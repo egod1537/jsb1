@@ -1,6 +1,7 @@
 import { Link, useParams } from "react-router-dom";
 import { ErrorPanel, Loading } from "../components/Loading";
-import { StatusBadge } from "../components/StatusBadge";
+import { PageHeader } from "../components/PageHeader";
+import { StatusTag } from "../components/StatusTag";
 import { TimeSeriesChart } from "../components/TimeSeriesChart";
 import { useRun, useSignals } from "../features/runs/useRunData";
 
@@ -34,14 +35,28 @@ export function RunDetailPage() {
   if (detail.error || !detail.data) return <main><ErrorPanel message={detail.error ?? "Run not found"} /></main>;
   const { run, metrics, artifacts } = detail.data;
   const telemetry = signals.data;
+  const metricsPanel = metrics.length > 0 && <section className="panel metric-panel">
+    <header className="panel-header"><span className="panel-title">Response metrics</span></header>
+    <dl className="metric-list">
+      {metrics.map((metric) => <div key={metric.name} title={metricDefinitions[metric.name]}>
+        <dt>{metricLabels[metric.name] ?? metric.name}</dt>
+        <dd>{value(metric.value, metric.unit)}</dd>
+      </div>)}
+    </dl>
+  </section>;
+  const artifactsPanel = artifacts.length > 0 && <section className="panel artifact-panel">
+    <header className="panel-header"><span className="panel-title">Artifacts</span><span className="panel-count">{artifacts.length}</span></header>
+    <div className="artifact-list">
+      {artifacts.map((artifact) => <a key={artifact.id} href={artifact.download_url}>
+        <span title={artifact.filename}>{artifact.filename}</span><small>{artifact.kind}</small>
+      </a>)}
+    </div>
+  </section>;
   return (
     <main>
       <Link className="back-link" to="/runs">← All runs</Link>
-      <div className="page-heading page-heading--detail">
-        <div><span className="eyebrow">{run.scenario_name}</span><h1>Run #{run.id}</h1></div>
-        <StatusBadge status={run.status} />
-      </div>
-      <section className="run-facts run-facts--lineage">
+      <PageHeader eyebrow={run.scenario_name} title={`Run #${run.id}`} actions={<StatusTag status={run.status} />} />
+      <section className="property-grid run-summary-panel" aria-label="Run summary">
         <div><span>Repository</span><strong>{run.repository_name ?? "Legacy runner"}</strong></div>
         <div><span>Branch</span><strong>{run.build_branch ?? "—"}</strong></div>
         <div><span>Commit</span><code title={run.commit_sha ?? undefined}>{run.commit_sha?.slice(0, 10) ?? "—"}</code></div>
@@ -52,31 +67,27 @@ export function RunDetailPage() {
       </section>
       {run.error_message && <ErrorPanel message={run.error_message} />}
       {(run.status === "queued" || run.status === "running") && <Loading label={run.status === "queued" ? "Waiting for a worker" : "Simulation running"} />}
-      {metrics.length > 0 && <section><div className="metric-grid">
-        {metrics.map((metric) => <article className="metric-card" key={metric.name} title={metricDefinitions[metric.name]}>
-          <span>{metricLabels[metric.name] ?? metric.name}</span>
-          <strong>{value(metric.value, metric.unit)}</strong>
-        </article>)}
-      </div></section>}
       {completed && signals.loading && <Loading label="Loading telemetry" />}
       {signals.error && <ErrorPanel message={signals.error} />}
-      {telemetry && <section className="plots">
-        <div className="section-heading"><div><span className="eyebrow">Recorded telemetry</span><h2>Flight response</h2></div><small>{telemetry.returned_points.toLocaleString()} / {telemetry.source_points.toLocaleString()} points</small></div>
-        <TimeSeriesChart title="Roll tracking" unit="deg" group={`run-${id}`} series={[
-          { name: "Commanded", time: telemetry.time, values: telemetry.series.commanded_roll, color: "#f2bd52", dashed: true },
-          { name: "Actual", time: telemetry.time, values: telemetry.series.roll, color: "#21c8b5" },
-        ]} />
-        <TimeSeriesChart title="Roll rate" unit="deg/s" group={`run-${id}`} series={[
-          { name: "Commanded", time: telemetry.time, values: telemetry.series.commanded_roll_rate, color: "#f2bd52", dashed: true },
-          { name: "Actual", time: telemetry.time, values: telemetry.series.roll_rate, color: "#5b8def" },
-        ]} />
-        <TimeSeriesChart title="Aileron" unit="deg" group={`run-${id}`} series={[
-          { name: "Aileron", time: telemetry.time, values: telemetry.series.aileron, color: "#d56ef4" },
-        ]} />
-      </section>}
-      {artifacts.length > 0 && <section className="artifacts"><h2>Artifacts</h2><div>
-        {artifacts.map((artifact) => <a key={artifact.id} href={artifact.download_url}>{artifact.filename}<span>{artifact.kind}</span></a>)}
-      </div></section>}
+      {telemetry ? <section className="telemetry-workspace">
+        <div className="telemetry-primary">
+          <div className="section-heading workspace-heading"><div><span className="eyebrow">Recorded telemetry</span><h2>Flight response</h2></div><small>{telemetry.returned_points.toLocaleString()} / {telemetry.source_points.toLocaleString()} points</small></div>
+          <div className="telemetry-chart-grid">
+            <div className="chart-span-full"><TimeSeriesChart title="Roll tracking" unit="deg" group={`run-${id}`} series={[
+              { name: "Commanded", time: telemetry.time, values: telemetry.series.commanded_roll, color: "#f2bd52", dashed: true },
+              { name: "Actual", time: telemetry.time, values: telemetry.series.roll, color: "#21c8b5" },
+            ]} /></div>
+            <TimeSeriesChart title="Roll rate" unit="deg/s" group={`run-${id}`} series={[
+              { name: "Commanded", time: telemetry.time, values: telemetry.series.commanded_roll_rate, color: "#f2bd52", dashed: true },
+              { name: "Actual", time: telemetry.time, values: telemetry.series.roll_rate, color: "#5b8def" },
+            ]} />
+            <TimeSeriesChart title="Aileron" unit="deg" group={`run-${id}`} series={[
+              { name: "Aileron", time: telemetry.time, values: telemetry.series.aileron, color: "#d56ef4" },
+            ]} />
+          </div>
+        </div>
+        <aside className="telemetry-inspector" aria-label="Run inspector">{metricsPanel}{artifactsPanel}</aside>
+      </section> : <div className="detail-side-panels">{metricsPanel}{artifactsPanel}</div>}
     </main>
   );
 }

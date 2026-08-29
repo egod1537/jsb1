@@ -21,6 +21,7 @@ from app.services.artifacts import ArtifactService
 from app.services.execution import RunExecutionService
 from app.services.runner import ExternalSimulationRunner, SimulationRunner
 from app.services.build_manager import BuildManager
+from app.services.build_info import load_build_info
 from app.services.repository_manager import RepositoryManager
 from app.services.deployment_manager import DeploymentManager
 from app.services.scenarios import ScenarioService
@@ -39,6 +40,7 @@ def create_app(
     runner_override: SimulationRunner | None = None,
 ) -> FastAPI:
     app_settings = settings or get_settings()
+    build_info = load_build_info(app_settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -108,6 +110,7 @@ def create_app(
         )
         scheduler = InProcessRunScheduler(execution, app_settings.max_concurrent_runs)
         app.state.settings = app_settings
+        app.state.build_info = build_info
         app.state.database = database
         app.state.repository = repository
         app.state.jsb_repositories = jsb_repositories

@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jsb1-analysis"
+version = "0.1.0"
+description = "Independent MCAP analysis tools for JSB1 run artifacts"
+requires-python = ">=3.11"
+dependencies = [
+  "matplotlib>=3.9,<4",
+  "mcap>=1.2,<2",
+  "numpy>=2.0,<3",
+  "pandas>=2.2,<4",
+  "scipy>=1.14,<2",
+]
+
+[project.scripts]
+jsb1-analyze-roll-hold = "jsb1_analysis.cli:main"
+
+[dependency-groups]
+dev = [
+  "ipykernel>=6.29,<8",
+  "jupyterlab>=4.3,<5",
+  "pytest>=8.3,<10",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+

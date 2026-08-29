@@ -1,8 +1,12 @@
+import { Button, HTMLTable } from "@blueprintjs/core";
+import { IconNames } from "@blueprintjs/icons";
 import { useCallback, useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import { ErrorPanel, Loading } from "../components/Loading";
-import { StatusBadge } from "../components/StatusBadge";
+import { PageHeader } from "../components/PageHeader";
+import { StatusTag } from "../components/StatusTag";
+import { showSuccess } from "../components/toast";
 import type { Build } from "../types/api";
 
 function duration(build: Build) {
@@ -29,6 +33,7 @@ export function BuildsPage() {
     try {
       await api.rebuild(id);
       await load();
+      void showSuccess(`Build #${id} queued`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Rebuild failed");
     } finally {
@@ -37,9 +42,9 @@ export function BuildsPage() {
   }
 
   return <main>
-    <div className="page-heading"><div><span className="eyebrow">Revision artifacts</span><h1>Builds</h1><p>Immutable CMake outputs linked to exact repository commits.</p></div></div>
+    <PageHeader eyebrow="Revision artifacts" title="Builds" description="Immutable CMake outputs linked to exact repository commits." />
     {!items && !error && <Loading label="Loading builds" />}
     {error && <ErrorPanel message={error} />}
-    {items && <div className="table-shell"><table><thead><tr><th>ID</th><th>Repository</th><th>Revision</th><th>Commit</th><th>Status</th><th>Created</th><th>Duration</th><th>Actions</th></tr></thead><tbody>{items.map((item) => <tr key={item.id} className={selected === item.id ? "selected-row" : ""}><td className="run-id">#{item.id}</td><td><Link to={`/repositories/${item.repository_id}`}>{item.repository_name}</Link></td><td>{item.branch ?? "detached"}</td><td><code title={item.commit_sha}>{item.commit_sha.slice(0, 10)}</code></td><td><StatusBadge status={item.status} /></td><td>{new Date(item.created_at).toLocaleString()}</td><td>{duration(item)}</td><td className="actions"><a href={`/api/builds/${item.id}/logs/stdout`} target="_blank" rel="noreferrer">Logs</a>{item.status === "completed" && <Link to={`/runs?build_id=${item.id}`}>Run simulation</Link>}<button onClick={() => rebuild(item.id)} disabled={busy === item.id}>{busy === item.id ? "Queuing…" : "Rebuild"}</button></td></tr>)}{items.length === 0 && <tr><td colSpan={8} className="empty">No builds yet. Select a repository revision first.</td></tr>}</tbody></table></div>}
+    {items && <div className="table-shell"><HTMLTable compact interactive striped><thead><tr><th>ID</th><th>Repository</th><th>Revision</th><th>Commit</th><th>Status</th><th>Created</th><th>Duration</th><th>Actions</th></tr></thead><tbody>{items.map((item) => <tr key={item.id} className={selected === item.id ? "selected-row" : ""}><td className="run-id">#{item.id}</td><td><Link to={`/repositories/${item.repository_id}`}>{item.repository_name}</Link></td><td className="technical-value">{item.branch ?? "detached"}</td><td><code title={item.commit_sha}>{item.commit_sha.slice(0, 10)}</code></td><td><StatusTag status={item.status} /></td><td className="technical-value">{new Date(item.created_at).toLocaleString()}</td><td className="technical-value">{duration(item)}</td><td className="actions"><div className="action-group"><a href={`/api/builds/${item.id}/logs/stdout`} target="_blank" rel="noreferrer">Logs</a>{item.status === "completed" && <Link to={`/runs?build_id=${item.id}`}>Run simulation</Link>}<Button icon={IconNames.REFRESH} loading={busy === item.id} minimal small onClick={() => rebuild(item.id)}>Rebuild</Button></div></td></tr>)}{items.length === 0 && <tr><td colSpan={8} className="empty">No builds yet. Select a repository revision first.</td></tr>}</tbody></HTMLTable></div>}
   </main>;
 }

@@ -9,9 +9,11 @@ UNITS_DIR="$STATE_ROOT/units"
 WORKTREES_DIR="$STATE_ROOT/worktrees"
 ROUTES_DIR="$STATE_ROOT/routes"
 LOCKS_DIR="$STATE_ROOT/locks"
+# shellcheck disable=SC2034 # Used by scripts that source this library.
 DEPLOY_COMPOSE="$REPO_ROOT/compose.deploy.yaml"
 EDGE_COMPOSE="$REPO_ROOT/compose.edge.yaml"
 EDGE_PROJECT="${JSB1_EDGE_PROJECT:-jsb1-edge}"
+CADDY_CONFIG_PATH="/etc/caddy/jsb-config/Caddyfile"
 BASE_DOMAIN="${JSB1_DEPLOYMENT_BASE_DOMAIN:-mangagaki.net}"
 MAIN_HOSTNAME="${JSB1_DEPLOYMENT_MAIN_HOSTNAME:-jsb.mangagaki.net}"
 MAIN_BRANCH="${JSB1_DEPLOYMENT_MAIN_BRANCH:-main}"
@@ -25,6 +27,12 @@ CLOUDFLARED_ORIGIN_CERT="${JSB1_CLOUDFLARED_ORIGIN_CERT:-$HOME/.cloudflared/cert
 CLOUDFLARED_CREDENTIALS="${JSB1_CLOUDFLARED_CREDENTIALS:-}"
 CLOUDFLARED_CONFIG="$STATE_ROOT/cloudflared/config.yml"
 CLOUDFLARE_API_TOKEN="${CLOUDFLARE_API_TOKEN:-${CF_API_TOKEN:-}}"
+# shellcheck disable=SC2034 # Used by deploy and cleanup entrypoints.
+DEPLOY_BUILDER="${JSB1_DEPLOY_BUILDER:-}"
+GITHUB_REPOSITORY="${JSB1_GITHUB_REPOSITORY:-egod1537/jsb1}"
+GITHUB_DEPLOYMENT_REQUIRED="${JSB1_GITHUB_DEPLOYMENT_REQUIRED:-false}"
+GITHUB_DEPLOYMENT_HELPER="${JSB1_GITHUB_DEPLOYMENT_HELPER:-$REPO_ROOT/scripts/github_deployment.py}"
+GITHUB_DEPLOYMENT_CREATED=false
 
 die() {
   printf 'error: %s\n' "$*" >&2
@@ -47,14 +55,20 @@ validate_runtime_config() {
     || die "invalid deployment base domain: $BASE_DOMAIN"
   [[ "$MAIN_HOSTNAME" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])$ && "$MAIN_HOSTNAME" == *.* ]] \
     || die "invalid main hostname: $MAIN_HOSTNAME"
-  [[ "$MAIN_HOSTNAME" == *".$BASE_DOMAIN" && "${MAIN_HOSTNAME%.$BASE_DOMAIN}" != *.* ]] \
+  [[ "$MAIN_HOSTNAME" == *".$BASE_DOMAIN" && "${MAIN_HOSTNAME%."$BASE_DOMAIN"}" != *.* ]] \
     || die "main hostname must be exactly one label beneath $BASE_DOMAIN"
   [[ "$PORT_START" =~ ^[0-9]+$ && "$PORT_END" =~ ^[0-9]+$ ]] \
     || die "deployment port range must be numeric"
   (( PORT_START >= 1024 && PORT_START < PORT_END && PORT_END <= 65535 )) \
     || die "invalid deployment port range: $PORT_START-$PORT_END"
-  [[ "$EDGE_HTTPS_PORT" =~ ^[0-9]+$ ]] && (( EDGE_HTTPS_PORT >= 1 && EDGE_HTTPS_PORT <= 65535 )) \
-    || die "invalid edge HTTPS port: $EDGE_HTTPS_PORT"
+  if [[ ! "$EDGE_HTTPS_PORT" =~ ^[0-9]+$ ]] \
+    || (( EDGE_HTTPS_PORT < 1 || EDGE_HTTPS_PORT > 65535 )); then
+    die "invalid edge HTTPS port: $EDGE_HTTPS_PORT"
+  fi
+  [[ "$GITHUB_DEPLOYMENT_REQUIRED" == true || "$GITHUB_DEPLOYMENT_REQUIRED" == false ]] \
+    || die "JSB1_GITHUB_DEPLOYMENT_REQUIRED must be true or false"
+  [[ "$GITHUB_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] \
+    || die "JSB1_GITHUB_REPOSITORY must use owner/name format"
 }
 
 acquire_lock() {
@@ -119,6 +133,19 @@ unit_value() {
   sed -n '1p' "$unit_dir/$name"
 }
 
+unit_dir_for_branch() {
+  local branch="$1"
+  local unit_dir
+  for unit_dir in "$UNITS_DIR"/*; do
+    [[ -d "$unit_dir" && -f "$unit_dir/branch" ]] || continue
+    if [[ "$(unit_value "$unit_dir" branch)" == "$branch" ]]; then
+      printf '%s\n' "$unit_dir"
+      return 0
+    fi
+  done
+  return 1
+}
+
 atomic_value() {
   local unit_dir="$1"
   local name="$2"
@@ -126,6 +153,143 @@ atomic_value() {
   local temp_file="$unit_dir/.$name.$$"
   printf '%s\n' "$value" >"$temp_file"
   mv "$temp_file" "$unit_dir/$name"
+}
+
+github_environment_for_slug() {
+  local slug="$1"
+  printf 'jsb1/%s\n' "$slug"
+}
+
+github_auth_token() {
+  if [[ -n "${JSB1_GITHUB_TOKEN:-}" ]]; then
+    printf '%s\n' "$JSB1_GITHUB_TOKEN"
+  elif [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    printf '%s\n' "$GITHUB_TOKEN"
+  else
+    return 1
+  fi
+}
+
+github_reporting_warning() {
+  local message="$1"
+  printf 'warning: GitHub deployment reporting %s\n' "$message" >&2
+  [[ "$GITHUB_DEPLOYMENT_REQUIRED" != true ]]
+}
+
+github_helper_error() {
+  local error_file="$1"
+  local message=""
+  if [[ -s "$error_file" ]]; then
+    message="$(sed -n '1p' "$error_file")"
+  fi
+  rm -f "$error_file"
+  printf '%s\n' "${message:-GitHub API request failed}"
+}
+
+github_update_deployment_status() {
+  local unit_dir="$1"
+  local state="$2"
+  local description="$3"
+  local environment_url="${4:-}"
+  local token deployment_id environment error_file message
+  deployment_id="$(unit_value "$unit_dir" github-deployment-id 2>/dev/null || true)"
+  environment="$(unit_value "$unit_dir" github-environment 2>/dev/null || true)"
+  if [[ ! "$deployment_id" =~ ^[0-9]+$ || -z "$environment" ]]; then
+    atomic_value "$unit_dir" github-deployment-status untracked
+    github_reporting_warning "skipped: no GitHub deployment is recorded for this environment"
+    return
+  fi
+  if ! token="$(github_auth_token)"; then
+    atomic_value "$unit_dir" github-deployment-status disabled
+    github_reporting_warning "skipped: JSB1_GITHUB_TOKEN/GITHUB_TOKEN is not configured"
+    return
+  fi
+  error_file="$unit_dir/.github-error.$$"
+  local -a arguments=(
+    --repository "$GITHUB_REPOSITORY"
+    status
+    --deployment-id "$deployment_id"
+    --state "$state"
+    --environment "$environment"
+    --description "$description"
+  )
+  if [[ -n "$environment_url" ]]; then
+    arguments+=(--environment-url "$environment_url")
+  fi
+  if ! JSB1_GITHUB_TOKEN="$token" python3 "$GITHUB_DEPLOYMENT_HELPER" "${arguments[@]}" \
+    >/dev/null 2>"$error_file"; then
+    message="$(github_helper_error "$error_file")"
+    atomic_value "$unit_dir" github-deployment-status error
+    github_reporting_warning "failed: $message"
+    return
+  fi
+  rm -f "$error_file"
+  atomic_value "$unit_dir" github-deployment-status "$state"
+}
+
+github_create_deployment() {
+  local unit_dir="$1"
+  local commit="$2"
+  local environment="$3"
+  local branch="$4"
+  local hostname="$5"
+  local token deployment_id error_file message
+  local -a arguments
+  GITHUB_DEPLOYMENT_CREATED=false
+  atomic_value "$unit_dir" github-environment "$environment"
+  if ! token="$(github_auth_token)"; then
+    atomic_value "$unit_dir" github-deployment-status disabled
+    github_reporting_warning "skipped: JSB1_GITHUB_TOKEN/GITHUB_TOKEN is not configured"
+    return
+  fi
+  error_file="$unit_dir/.github-error.$$"
+  arguments=(
+    --repository "$GITHUB_REPOSITORY"
+    create
+    --commit "$commit"
+    --environment "$environment"
+    --description "Deploy $branch to https://$hostname"
+  )
+  if [[ "$branch" == "$MAIN_BRANCH" ]]; then
+    arguments+=(--production-environment)
+  fi
+  if ! deployment_id="$(JSB1_GITHUB_TOKEN="$token" python3 "$GITHUB_DEPLOYMENT_HELPER" \
+    "${arguments[@]}" 2>"$error_file")"; then
+    message="$(github_helper_error "$error_file")"
+    atomic_value "$unit_dir" github-deployment-status error
+    github_reporting_warning "failed: $message"
+    return
+  fi
+  rm -f "$error_file"
+  [[ "$deployment_id" =~ ^[0-9]+$ ]] || {
+    atomic_value "$unit_dir" github-deployment-status error
+    github_reporting_warning "failed: GitHub returned an invalid deployment id"
+    return
+  }
+  atomic_value "$unit_dir" github-deployment-id "$deployment_id"
+  atomic_value "$unit_dir" github-deployment-commit "$commit"
+  atomic_value "$unit_dir" github-deployment-status created
+  # shellcheck disable=SC2034 # Read by deploy.sh after this sourced function returns.
+  GITHUB_DEPLOYMENT_CREATED=true
+  github_update_deployment_status "$unit_dir" in_progress "Deployment in progress"
+}
+
+github_mark_environment_inactive() {
+  local unit_dir="$1"
+  github_update_deployment_status "$unit_dir" inactive "Environment undeployed"
+}
+
+record_successful_commit() {
+  local unit_dir="$1"
+  local commit="$2"
+  local successful
+  successful="$(unit_value "$unit_dir" successful-commit 2>/dev/null || true)"
+  if [[ -n "$successful" && "$successful" != "$commit" ]]; then
+    atomic_value "$unit_dir" previous-successful-commit "$successful"
+  elif [[ -z "$successful" ]]; then
+    rm -f "$unit_dir/previous-successful-commit"
+  fi
+  atomic_value "$unit_dir" successful-commit "$commit"
 }
 
 project_for_slug() {
@@ -237,21 +401,30 @@ PY
 
 export_compose_values() {
   local unit_dir="$1"
-  export JSB1_BUILD_CONTEXT="$(unit_value "$unit_dir" worktree)"
-  export JSB1_DEPLOY_BACKEND_DOCKERFILE="$REPO_ROOT/deploy/backend.Dockerfile"
-  export JSB1_DEPLOY_FRONTEND_DOCKERFILE="$REPO_ROOT/deploy/frontend.Dockerfile"
-  export JSB1_DEPLOY_CONFIG_CONTEXT="$REPO_ROOT/deploy"
-  export JSB1_DEPLOY_DATA_DIR="$unit_dir/data"
-  export JSB1_SCENARIO_DIR="$(unit_value "$unit_dir" scenario-path)"
-  export JSB1_DEPLOY_SLUG="$(basename "$unit_dir")"
-  export JSB1_DEPLOY_COMMIT="$(unit_value "$unit_dir" commit)"
-  export JSB1_DEPLOY_HOSTNAME="$(unit_value "$unit_dir" hostname)"
-  export JSB1_DEPLOY_PORT="$(unit_value "$unit_dir" port)"
-  export JSB1_CADDY_ROUTES_DIR="$ROUTES_DIR"
-  export JSB1_TLS_CERT_PATH="$TLS_CERT_PATH"
-  export JSB1_TLS_KEY_PATH="$TLS_KEY_PATH"
-  export JSB1_CLOUDFLARED_CONFIG_PATH="$CLOUDFLARED_CONFIG"
-  export JSB1_CLOUDFLARED_CREDENTIALS="$CLOUDFLARED_CREDENTIALS"
+  JSB1_BUILD_CONTEXT="$(unit_value "$unit_dir" worktree)"
+  JSB1_DEPLOY_BACKEND_DOCKERFILE="$REPO_ROOT/deploy/backend.Dockerfile"
+  JSB1_DEPLOY_FRONTEND_DOCKERFILE="$REPO_ROOT/deploy/frontend.Dockerfile"
+  JSB1_DEPLOY_CONFIG_CONTEXT="$REPO_ROOT/deploy"
+  JSB1_DEPLOY_DATA_DIR="$unit_dir/data"
+  JSB1_SCENARIO_DIR="$(unit_value "$unit_dir" scenario-path)"
+  JSB1_DEPLOY_SLUG="$(basename "$unit_dir")"
+  JSB1_DEPLOY_BRANCH="$(unit_value "$unit_dir" branch)"
+  JSB1_DEPLOY_COMMIT="$(unit_value "$unit_dir" commit)"
+  JSB1_DEPLOY_BUILT_AT="$(unit_value "$unit_dir" built-at 2>/dev/null || printf unknown)"
+  JSB1_DEPLOY_HOSTNAME="$(unit_value "$unit_dir" hostname)"
+  JSB1_DEPLOY_PORT="$(unit_value "$unit_dir" port)"
+  JSB1_CADDY_ROUTES_DIR="$ROUTES_DIR"
+  JSB1_TLS_CERT_PATH="$TLS_CERT_PATH"
+  JSB1_TLS_KEY_PATH="$TLS_KEY_PATH"
+  JSB1_CLOUDFLARED_CONFIG_PATH="$CLOUDFLARED_CONFIG"
+  JSB1_CLOUDFLARED_CREDENTIALS="$CLOUDFLARED_CREDENTIALS"
+  export JSB1_BUILD_CONTEXT JSB1_DEPLOY_BACKEND_DOCKERFILE
+  export JSB1_DEPLOY_FRONTEND_DOCKERFILE JSB1_DEPLOY_CONFIG_CONTEXT
+  export JSB1_DEPLOY_DATA_DIR JSB1_SCENARIO_DIR JSB1_DEPLOY_SLUG JSB1_DEPLOY_BRANCH
+  export JSB1_DEPLOY_COMMIT JSB1_DEPLOY_BUILT_AT JSB1_DEPLOY_HOSTNAME
+  export JSB1_DEPLOY_PORT JSB1_CADDY_ROUTES_DIR
+  export JSB1_TLS_CERT_PATH JSB1_TLS_KEY_PATH JSB1_CLOUDFLARED_CONFIG_PATH
+  export JSB1_CLOUDFLARED_CREDENTIALS
 }
 
 resolve_cloudflare_tunnel() {
@@ -470,8 +643,8 @@ PY
 }
 
 reload_edge() {
-  edge_compose exec -T edge caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null
-  edge_compose exec -T edge caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null
+  edge_compose exec -T edge caddy validate --config "$CADDY_CONFIG_PATH" --adapter caddyfile >/dev/null
+  edge_compose exec -T edge caddy reload --config "$CADDY_CONFIG_PATH" --adapter caddyfile >/dev/null
 }
 
 write_route() {
@@ -493,7 +666,7 @@ wait_for_http() {
   local port="$1"
   local deadline=$((SECONDS + ${JSB1_DEPLOYMENT_HEALTH_TIMEOUT_SEC:-180}))
   while (( SECONDS < deadline )); do
-    if curl --noproxy '*' --fail --silent --show-error --max-time 3 "http://127.0.0.1:$port/api/health" >/dev/null 2>&1; then
+    if http_2xx "http://127.0.0.1:$port/api/health" 3; then
       return
     fi
     sleep 2
@@ -501,12 +674,47 @@ wait_for_http() {
   die "application health check timed out on port $port"
 }
 
+http_2xx() {
+  local url="$1"
+  local timeout="${2:-10}"
+  shift 2
+  local status
+  status="$(curl --noproxy '*' --silent --show-error --output /dev/null \
+    --write-out '%{http_code}' --max-time "$timeout" "$@" "$url" 2>/dev/null)" || return 1
+  [[ "$status" =~ ^2[0-9][0-9]$ ]]
+}
+
+read_version_metadata() {
+  local url="$1"
+  local timeout="${2:-10}"
+  local response
+  response="$(curl --noproxy '*' --fail --silent --show-error --max-time "$timeout" "$url" 2>/dev/null)" \
+    || return 1
+  python3 - "$response" <<'PY'
+import json
+import sys
+
+try:
+    payload = json.loads(sys.argv[1])
+except (IndexError, json.JSONDecodeError):
+    raise SystemExit(1)
+required = ("branch", "commit", "short_commit", "built_at", "hostname")
+if not isinstance(payload, dict) or any(key not in payload for key in required):
+    raise SystemExit(1)
+if not all(isinstance(payload[key], str) for key in required[:-1]):
+    raise SystemExit(1)
+if payload["hostname"] is not None and not isinstance(payload["hostname"], str):
+    raise SystemExit(1)
+print(f'{payload["branch"]}\t{payload["commit"]}')
+PY
+}
+
 verify_https_route() {
   local hostname="$1"
   local expected_fingerprint served_fingerprint
-  curl --noproxy '*' --insecure --fail --silent --show-error --max-time 5 \
-    --resolve "$hostname:$EDGE_HTTPS_PORT:127.0.0.1" \
-    "https://$hostname:$EDGE_HTTPS_PORT/api/health" >/dev/null
+  http_2xx "https://$hostname:$EDGE_HTTPS_PORT/api/health" 5 \
+    --insecure --resolve "$hostname:$EDGE_HTTPS_PORT:127.0.0.1" \
+    || die "local edge HTTPS health check failed for $hostname"
   expected_fingerprint="$(openssl x509 -in "$TLS_CERT_PATH" -noout -fingerprint -sha256 | tr '[:lower:]' '[:upper:]')"
   served_fingerprint="$(printf '\n' | openssl s_client -connect "127.0.0.1:$EDGE_HTTPS_PORT" -servername "$hostname" 2>/dev/null | openssl x509 -noout -fingerprint -sha256 | tr '[:lower:]' '[:upper:]')"
   [[ "$served_fingerprint" == "$expected_fingerprint" ]] || die "edge did not serve the configured Origin Certificate"
@@ -516,8 +724,7 @@ verify_public_https_route() {
   local hostname="$1"
   local deadline=$((SECONDS + ${JSB1_DEPLOYMENT_PUBLIC_TIMEOUT_SEC:-180}))
   while (( SECONDS < deadline )); do
-    if curl --noproxy '*' --fail --silent --show-error --max-time 10 \
-      "https://$hostname/api/health" >/dev/null 2>&1; then
+    if http_2xx "https://$hostname/api/health" 10; then
       return
     fi
     sleep "${JSB1_DEPLOYMENT_HEALTH_INTERVAL_SEC:-2}"
@@ -528,9 +735,14 @@ verify_public_https_route() {
 remove_old_worktrees() {
   local slug="$1"
   local current="$2"
+  local previous_commit="${3:-}"
+  local previous_tree=""
+  if [[ "$previous_commit" =~ ^[0-9a-f]{40}$ ]]; then
+    previous_tree="$WORKTREES_DIR/$slug/${previous_commit:0:12}"
+  fi
   local old_tree
   for old_tree in "$WORKTREES_DIR/$slug"/*; do
-    [[ -e "$old_tree/.git" && "$old_tree" != "$current" ]] || continue
+    [[ -e "$old_tree/.git" && "$old_tree" != "$current" && "$old_tree" != "$previous_tree" ]] || continue
     git -C "$REPO_ROOT" worktree remove --force "$old_tree"
   done
   git -C "$REPO_ROOT" worktree prune

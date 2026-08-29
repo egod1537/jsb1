@@ -1,7 +1,10 @@
+import { Callout, Intent, Spinner } from "@blueprintjs/core";
+import { IconNames } from "@blueprintjs/icons";
+
 export function Loading({ label = "Loading" }: { label?: string }) {
   return (
     <div className="loading" role="status">
-      <span className="loading__dot" />
+      <Spinner size={16} />
       {label}
     </div>
   );
@@ -9,10 +12,8 @@ export function Loading({ label = "Loading" }: { label?: string }) {
 
 export function ErrorPanel({ message }: { message: string }) {
   return (
-    <div className="error-panel" role="alert">
-      <strong>Could not load data</strong>
-      <span>{message}</span>
-    </div>
+    <Callout className="error-panel" icon={IconNames.ERROR} intent={Intent.DANGER} title="Could not load data" role="alert">
+      {message}
+    </Callout>
   );
 }
-

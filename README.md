@@ -48,6 +48,16 @@ npm install
 npm run dev
 ```
 
+Independent MCAP exploration and repeatable Python analyzers live in
+[`analysis/`](analysis/README.md):
+
+```sh
+cd analysis
+uv sync
+uv run pytest
+uv run jupyter lab
+```
+
 Vite serves the UI at `http://localhost:5173` and proxies `/api` to `http://127.0.0.1:8000`. Copy `.env.example` to `.env` at the repository root or export the variables before starting the backend:
 
 | Variable | Default | Purpose |
@@ -150,6 +160,7 @@ The database stores paths relative to `JSB1_DATA_DIR`. Artifact responses expose
 - `POST /api/deployments/{id}/restart`
 - `DELETE /api/deployments/{id}?force=false`
 - `GET /api/health`
+- `GET /api/version`
 - `GET /api/scenarios`
 - `GET /api/autopilots`
 - `POST /api/runs`
@@ -313,20 +324,98 @@ Deploy, list, and remove instances from the repository root:
 ./undeploy.sh impl
 ```
 
+Each deploy resolves one immutable full commit SHA before the image build and
+records a UTC build timestamp in the unit state. The same branch, commit,
+timestamp, and hostname are injected into the backend runtime and baked into the
+frontend bundle. Check the local record and the running preview with:
+
+```sh
+./deploy.sh --status
+curl https://impl-jsb.mangagaki.net/api/version
+```
+
+The Navbar shows the baked deployed revision (for example `impl @ 8efb066`). Its
+tooltip contains the full SHA, localized build time, and hostname; clicking a
+known SHA opens that exact `egod1537/jsb1` commit on GitHub. Development builds
+fall back to `dev` / `unknown` without inspecting Git or a remote branch.
+
+### GitHub deployment reporting
+
+Deployment reporting is an optional observability layer over the existing pipeline.
+Give the deployment host a fine-grained personal access token or GitHub App token
+with repository **Deployments: write** permission, then expose it only to the host
+process running the deployment:
+
+```sh
+export JSB1_GITHUB_TOKEN='...'
+./deploy.sh impl
+```
+
+A classic personal access token requires `repo_deployment` (or the broader `repo`
+scope), but the fine-grained permission is preferred.
+
+`GITHUB_TOKEN` is accepted as a fallback. The token is never passed to Compose,
+Docker builds, the frontend, or `/api/version`, and is never saved in deployment
+unit state. Do not add it to `.env`, `.env.example`, a worktree, or a cron command.
+An installed automatic watcher must receive the token from its own secure host
+process environment; `auto-deploy.sh --install` intentionally does not copy secrets
+into the generated crontab.
+
+After `deploy.sh` resolves the immutable SHA, it creates a GitHub Deployment in
+`jsb1/<branch-slug>` and reports `in_progress`. Only successful `/api/version` and
+public HTTPS verification cause `success`, with the actual site stored as the
+environment URL. A later commit or explicit rollback creates another Deployment in
+the same environment, preserving commit history. Successful undeploy reports the
+latest recorded Deployment as `inactive`; Deployment objects are never deleted.
+For example:
+
+```text
+commit a20391f → environment jsb1/impl → https://impl-jsb.mangagaki.net
+```
+
+GitHub reporting is non-blocking by default. A missing token, API outage, or rate
+limit produces a concise warning while the core deployment continues. Enforce it
+only when desired:
+
+```sh
+export JSB1_GITHUB_DEPLOYMENT_REQUIRED=true
+```
+
+The status table reads the locally recorded GitHub state without making API calls:
+
+```sh
+./deploy.sh --status
+```
+
+In GitHub, open the repository's **Deployments** or **Environments** view to see the
+commit history, current status, and **View deployment** link. Commit Status API is
+not also emitted: Deployment API already provides the required lifecycle and URL,
+while avoiding duplicate status UI and an extra `Commit statuses: write` permission.
+
 ### Automatic deployment after push
 
-On the deployment Mac, install the per-user launchd watcher once:
+On the deployment Mac, install the headless-safe per-user crontab watcher once:
 
 ```sh
 ./auto-deploy.sh --install
 ```
 
-It checks `origin` every minute. A newly created remote branch, or a new commit
-on an existing branch, is deployed with the exact remote commit SHA. The watcher
-does not need a GitHub token, webhook, or repository secret, and it also detects
+It checks `origin` every minute. A newly created preview branch, or a new commit
+on an existing preview branch, is deployed with the exact remote commit SHA. The core
+watcher does not require a GitHub token, webhook, or repository secret; optional
+GitHub Deployment reporting uses the host-only token described above. It also detects
 branches that do not contain a GitHub Actions workflow file. Repeated scans are
 no-ops when the deployed SHA already matches the remote head. A failed SHA is
 retried after five minutes; a newer push is attempted immediately.
+
+`main` is excluded from automatic deployment by default. A changed main head is
+logged as skipped and remains available for explicit deployment with
+`./deploy.sh main`. Opt in and persist the setting only when automatic production
+deployment is intentionally enabled:
+
+```sh
+JSB1_AUTO_DEPLOY_MAIN=true ./auto-deploy.sh --install
+```
 
 ```sh
 git push origin feature/foo
@@ -340,9 +429,13 @@ git push origin feature/foo
 The headless-safe watcher is installed in the current user's crontab and writes its
 local log beneath the ignored `data/branch-deployments/logs/` directory. Docker
 Desktop or OrbStack must be
-running for deployment to succeed. Removing a remote branch does not automatically
-destroy its runtime or data; use `./undeploy.sh <branch>` explicitly. To disable
-the watcher without touching running deployments, use `./auto-deploy.sh --uninstall`.
+running for deployment to succeed. When a preview branch disappears from `origin`,
+the watcher records `stale-since`. If it stays absent for
+`JSB1_STALE_BRANCH_GRACE_SEC` (default 86400, 24 hours), the watcher calls the normal
+`undeploy.sh` flow. Restoring the branch during the grace period clears the stale
+marker. `main` is never stale-removed. Stopped deployments and retained branch data
+are also not deleted automatically. To disable the watcher without touching running
+deployments, use `./auto-deploy.sh --uninstall`.
 
 `main` removal requires `./undeploy.sh main --force`. Undeploy removes the
 containers, project network, route, worktree, and port reservation, but retains the
@@ -359,6 +452,10 @@ edge publishes HTTP on loopback port 80 and HTTPS on loopback port 4443. Port 44
 avoids the Tailscale listener already using port 443 on this Mac; Cloudflare still
 serves the public URL on standard HTTPS port 443. Override it with
 `JSB1_EDGE_HTTPS_PORT=443` on a host where port 443 is free.
+
+All long-running application, Caddy, and cloudflared containers use Docker's
+`json-file` logger with `max-size: 10m` and `max-file: 5`. The policy is applied when
+Compose next creates or recreates each container.
 
 The default external TLS paths are:
 
@@ -378,14 +475,73 @@ hop. Do not run the CLI edge and the legacy
 `compose.preview.yaml` edge simultaneously because they are alternative owners of
 the same public routes.
 
-Plain deployment always follows the latest `origin/<branch>`. To pin or roll back
-the same hostname to an already-fetched commit, use:
+Plain deployment always follows the latest `origin/<branch>`. The official explicit
+rollback path pins the same hostname to a known-good, locally available commit:
 
 ```sh
+./deploy.sh main --revision <full-known-good-commit-sha>
 ./deploy.sh impl --revision <full-commit-sha>
 ```
 
-Running `./deploy.sh impl` later moves it back to the current remote branch head.
+After each fully successful public HTTPS deployment, JSB1 records the current and
+previous successful commits. If that history is certain, the convenience helper can
+select it:
+
+```sh
+./rollback.sh impl --dry-run
+./rollback.sh impl
+```
+
+It refuses to guess from `HEAD^` or ordinary Git history. If no previous successful
+marker exists, use the explicit `--revision` command above. Running `./deploy.sh
+impl` later moves it back to the current remote branch head.
+
+Build and recreate are separate steps. A build failure therefore leaves existing
+containers running. Once `docker compose up --force-recreate` begins, however, an
+application health failure can leave the new unhealthy containers in place; the
+existing Caddy/DNS route is not changed, but this CLI architecture is not blue-green
+and does not automatically roll containers back. Use `rollback.sh` or explicit
+`--revision` to restore a recorded good version. A future blue-green handoff remains
+an intentional TODO rather than a hidden architecture change.
+
+### Operations and recovery helpers
+
+The status command remains state-first and still works when Docker is unavailable.
+It now includes container state, the full worktree path, active deployment count,
+deployment/worktree disk usage, and a compact Docker disk summary:
+
+```sh
+./deploy.sh --status
+```
+
+Reboot recovery is read-only and returns non-zero if any global or selected branch
+check fails:
+
+```sh
+./verify-deployment.sh
+./verify-deployment.sh main
+./verify-deployment.sh impl
+```
+
+It checks Docker, TLS files, edge/cloudflared, Caddy validation, Compose containers,
+the loopback `/api/health` endpoint, generated route, public HTTPS, and that the
+public `/api/version` branch/commit match unit state without starting or restarting
+anything.
+
+Conservative Docker cleanup defaults to a report-only preview:
+
+```sh
+./cleanup-deployments.sh --dry-run
+./cleanup-deployments.sh
+```
+
+Only unused images carrying the JSB1 deployment label or an unambiguous
+`jsb1-<branch>-(backend|web)` repository name, plus unattached `jsb1-*` Compose
+networks, are eligible. Every image referenced by any running or stopped container
+is protected; volumes are never removed. The shared default BuildKit cache is
+reported but not pruned because ownership cannot be attributed safely. Cache pruning
+is enabled only when `JSB1_DEPLOY_BUILDER` names a dedicated existing JSB1 builder.
+The helper never runs `docker system prune -a` or volume pruning.
 
 ### Controller startup
 

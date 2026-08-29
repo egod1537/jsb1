@@ -5,7 +5,6 @@ import {
   DataZoomComponent,
   GridComponent,
   LegendComponent,
-  TitleComponent,
   TooltipComponent,
 } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
@@ -15,7 +14,6 @@ echarts.use([
   DataZoomComponent,
   GridComponent,
   LegendComponent,
-  TitleComponent,
   TooltipComponent,
   CanvasRenderer,
 ]);
@@ -37,6 +35,17 @@ interface Props {
 
 export function TimeSeriesChart({ title, unit, series, group }: Props) {
   const element = useRef<HTMLDivElement>(null);
+  let start = Number.POSITIVE_INFINITY;
+  let end = Number.NEGATIVE_INFINITY;
+  for (const item of series) {
+    for (const time of item.time) {
+      start = Math.min(start, time);
+      end = Math.max(end, time);
+    }
+  }
+  const range = Number.isFinite(start) && Number.isFinite(end)
+    ? `${start.toFixed(1)}–${end.toFixed(1)} s`
+    : "No samples";
 
   useEffect(() => {
     if (!element.current) return;
@@ -48,24 +57,18 @@ export function TimeSeriesChart({ title, unit, series, group }: Props) {
     chart.setOption({
       animation: false,
       color: series.map((item) => item.color).filter((color): color is string => Boolean(color)),
-      title: {
-        text: title,
-        left: 14,
-        top: 10,
-        textStyle: { color: "#dce7f5", fontSize: 14, fontWeight: 600 },
-      },
       legend: {
         right: 16,
-        top: 11,
-        textStyle: { color: "#8495ac" },
+        top: 8,
+        textStyle: { color: "#abb3bf" },
         icon: "roundRect",
       },
-      grid: { left: 62, right: 22, top: 54, bottom: 62 },
+      grid: { left: 62, right: 22, top: 38, bottom: 62 },
       tooltip: {
         trigger: "axis",
-        backgroundColor: "rgba(8, 16, 29, 0.94)",
-        borderColor: "#28415f",
-        textStyle: { color: "#e6edf6" },
+        backgroundColor: "rgba(37, 42, 49, 0.96)",
+        borderColor: "#5f6b7c",
+        textStyle: { color: "#f6f7f9" },
         valueFormatter: (value: unknown) => `${Number(value).toFixed(3)} ${unit}`,
       },
       xAxis: {
@@ -73,15 +76,15 @@ export function TimeSeriesChart({ title, unit, series, group }: Props) {
         name: "time (s)",
         nameLocation: "middle",
         nameGap: 28,
-        axisLine: { lineStyle: { color: "#3a4d66" } },
-        axisLabel: { color: "#71849d" },
-        splitLine: { lineStyle: { color: "#17263a" } },
+        axisLine: { lineStyle: { color: "#5f6b7c" } },
+        axisLabel: { color: "#abb3bf" },
+        splitLine: { lineStyle: { color: "#383e47" } },
       },
       yAxis: {
         type: "value",
         name: unit,
-        axisLabel: { color: "#71849d" },
-        splitLine: { lineStyle: { color: "#17263a" } },
+        axisLabel: { color: "#abb3bf" },
+        splitLine: { lineStyle: { color: "#383e47" } },
       },
       dataZoom: [
         { type: "inside", filterMode: "none" },
@@ -89,10 +92,10 @@ export function TimeSeriesChart({ title, unit, series, group }: Props) {
           type: "slider",
           height: 18,
           bottom: 10,
-          borderColor: "#263b55",
-          fillerColor: "rgba(33, 200, 181, 0.14)",
-          handleStyle: { color: "#21c8b5" },
-          textStyle: { color: "#71849d" },
+          borderColor: "#5f6b7c",
+          fillerColor: "rgba(45, 114, 210, 0.2)",
+          handleStyle: { color: "#4c90f0" },
+          textStyle: { color: "#abb3bf" },
         },
       ],
       series: series.map((item) => ({
@@ -110,7 +113,13 @@ export function TimeSeriesChart({ title, unit, series, group }: Props) {
       resize.disconnect();
       chart.dispose();
     };
-  }, [group, series, title, unit]);
+  }, [group, series, unit]);
 
-  return <div className="chart" ref={element} aria-label={`${title} chart`} />;
+  return <section className="chart-panel">
+    <header className="panel-header chart-panel-header">
+      <div><span className="panel-title">{title}</span><span className="chart-unit">{unit}</span></div>
+      <span className="chart-range">{range}</span>
+    </header>
+    <div className="chart" ref={element} aria-label={`${title} chart`} />
+  </section>;
 }

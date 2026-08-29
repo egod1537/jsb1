@@ -1,4 +1,4 @@
-import type { Branch, Build, CreateRunInput, Deployment, Repository, RunDetail, RunSummary, SignalResponse } from "../types/api";
+import type { Branch, Build, BuildVersion, CreateRunInput, Deployment, Repository, RunDetail, RunSummary, SignalResponse } from "../types/api";
 
 export class ApiError extends Error {
   constructor(
@@ -33,6 +33,7 @@ async function requestVoid(path: string, init?: RequestInit): Promise<void> {
 }
 
 export const api = {
+  version: () => request<BuildVersion>("/api/version"),
   scenarios: () => request<string[]>("/api/scenarios"),
   autopilots: () => request<string[]>("/api/autopilots"),
   runs: (query = "") => request<RunSummary[]>(`/api/runs${query}`),

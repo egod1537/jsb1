@@ -1,5 +1,6 @@
 import { lazy, Suspense } from "react";
-import { NavLink, Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes } from "react-router-dom";
+import { AppShell } from "./components/AppShell";
 import { Loading } from "./components/Loading";
 import { RunsPage } from "./pages/RunsPage";
 
@@ -23,12 +24,7 @@ const DeploymentsPage = lazy(() =>
 );
 
 export function App() {
-  return <div className="app-shell">
-    <header className="topbar">
-      <NavLink to="/runs" className="brand"><span>J1</span><div><strong>JSB1</strong><small>Regression server</small></div></NavLink>
-      <nav><NavLink to="/runs">Runs</NavLink><NavLink to="/repositories">Repositories</NavLink><NavLink to="/builds">Builds</NavLink><NavLink to="/deployments">Deployments</NavLink><NavLink to="/compare">Compare</NavLink></nav>
-      <div className="host"><i /> Mac mini</div>
-    </header>
+  return <AppShell>
     <Suspense fallback={<main><Loading label="Loading view" /></main>}>
       <Routes>
         <Route path="/runs" element={<RunsPage />} />
@@ -41,5 +37,5 @@ export function App() {
         <Route path="*" element={<Navigate to="/runs" replace />} />
       </Routes>
     </Suspense>
-  </div>;
+  </AppShell>;
 }

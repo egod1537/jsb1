@@ -1,3 +1,9 @@
+x-jsb1-logging: &jsb1-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   backend:
     environment:
@@ -55,6 +61,7 @@ services:
         source: ${JSB1_TLS_KEY_PATH}
         target: ${JSB1_TLS_KEY_PATH}
         read_only: true
+    logging: *jsb1-logging
     restart: unless-stopped
 
   tunnel:

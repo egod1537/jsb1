@@ -12,6 +12,7 @@ from app.analysis.downsampling import uniform_downsample
 from app.analysis.mcap_reader import McapReadError, McapRunReader, canonical_name
 from app.api.dependencies import (
     get_build_manager,
+    get_build_info,
     get_instances,
     get_app_settings,
     get_artifact_service,
@@ -26,6 +27,7 @@ from app.api.repository_routes import router as repository_router
 from app.api.deployment_routes import router as deployment_router
 from app.config.settings import Settings
 from app.domain.models import RunCreate, RunDetail, RunStatus, SignalResponse
+from app.domain.build_info import BuildInfo
 from app.repositories.instances import InstanceRepository
 from app.services.build_manager import BuildManager
 from app.repositories.database import Database
@@ -70,6 +72,11 @@ def health(
         "runner_available": runner_available,
         "database": "ok" if database_ok else "error",
     }
+
+
+@router.get("/version", response_model=BuildInfo)
+def version(build_info: Annotated[BuildInfo, Depends(get_build_info)]) -> BuildInfo:
+    return build_info
 
 
 @router.get("/scenarios")
