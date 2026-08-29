@@ -1,0 +1,18 @@
+{
+	auto_https disable_redirects
+}
+
+(jsb_tls) {
+	tls /etc/caddy/tls/jsb-origin.pem /etc/caddy/tls/jsb-origin.key
+}
+
+http://jsb.mangagaki.net, http://*.mangagaki.net {
+	redir https://{host}{uri} permanent
+}
+
+:443 {
+	import jsb_tls
+	respond 404
+}
+
+import /etc/caddy/routes/*.caddy

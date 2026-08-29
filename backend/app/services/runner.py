@@ -7,7 +7,7 @@ import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 
 logger = logging.getLogger(__name__)
@@ -35,6 +35,8 @@ class SimulationRunner(Protocol):
         output_directory: Path,
         autopilot: str,
         log_path: Path,
+        executable_path: Path | None = None,
+        on_started: Callable[[int], None] | None = None,
     ) -> RunnerResult: ...
 
 
@@ -43,9 +45,10 @@ class ExternalSimulationRunner:
         self.executable = executable
         self.timeout_sec = timeout_sec
 
-    def available(self) -> bool:
-        value = str(self.executable)
-        return self.executable.is_file() or shutil.which(value) is not None
+    def available(self, executable: Path | None = None) -> bool:
+        selected = executable or self.executable
+        value = str(selected)
+        return selected.is_file() or shutil.which(value) is not None
 
     async def run(
         self,
@@ -54,11 +57,14 @@ class ExternalSimulationRunner:
         output_directory: Path,
         autopilot: str,
         log_path: Path,
+        executable_path: Path | None = None,
+        on_started: Callable[[int], None] | None = None,
     ) -> RunnerResult:
-        if not self.available():
-            raise RunnerUnavailable(f"runner executable not found: {self.executable}")
+        executable = executable_path or self.executable
+        if not self.available(executable):
+            raise RunnerUnavailable(f"runner executable not found: {executable}")
         command = [
-            str(self.executable),
+            str(executable),
             "--scenario",
             str(scenario_path),
             "--output",
@@ -76,6 +82,13 @@ class ExternalSimulationRunner:
                 stderr=asyncio.subprocess.STDOUT,
                 env=os.environ.copy(),
             )
+            if on_started is not None:
+                try:
+                    on_started(process.pid)
+                except Exception:
+                    process.terminate()
+                    await process.wait()
+                    raise
             try:
                 await asyncio.wait_for(process.wait(), timeout=self.timeout_sec)
             except TimeoutError as exc:
@@ -95,4 +108,3 @@ class ExternalSimulationRunner:
         elapsed = time.perf_counter() - started
         logger.info("simulation exited code=%s wall_time=%.3f", process.returncode, elapsed)
         return RunnerResult(exit_code=int(process.returncode), wall_time_sec=elapsed)
-

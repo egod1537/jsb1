@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { ErrorPanel, Loading } from "../components/Loading";
 import { NewRunForm } from "../components/NewRunForm";
 import { StatusBadge } from "../components/StatusBadge";
@@ -14,6 +14,9 @@ function time(value: string) {
 export function RunsPage() {
   const { data, loading, error } = useRuns();
   const [creating, setCreating] = useState(false);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedBuild = Number(searchParams.get("build_id")) || undefined;
+  const showForm = creating || requestedBuild !== undefined;
   return (
     <main>
       <div className="page-heading">
@@ -30,7 +33,7 @@ export function RunsPage() {
         <div className="table-shell">
           <table>
             <thead><tr>
-              <th>ID</th><th>Status</th><th>Scenario</th><th>Commit</th>
+              <th>ID</th><th>Status</th><th>Scenario</th><th>Repository</th><th>Build</th><th>Commit</th>
               <th>Autopilot</th><th>Created</th><th>Duration</th>
             </tr></thead>
             <tbody>
@@ -39,18 +42,19 @@ export function RunsPage() {
                   <td><Link className="run-id" to={`/runs/${run.id}`}>#{run.id}</Link></td>
                   <td><StatusBadge status={run.status} /></td>
                   <td><Link to={`/runs/${run.id}`}>{run.scenario_name}</Link></td>
-                  <td><code>{run.commit_sha.slice(0, 7)}</code></td>
+                  <td>{run.repository_name ?? "Legacy"}</td>
+                  <td>{run.build_id ? <Link to={`/builds?selected=${run.build_id}`}>#{run.build_id}</Link> : "—"}</td>
+                  <td><code title={run.commit_sha ?? undefined}>{run.commit_sha?.slice(0, 10) ?? "—"}</code></td>
                   <td>{run.autopilot}</td><td>{time(run.created_at)}</td>
                   <td>{run.wall_time_sec == null ? "—" : `${run.wall_time_sec.toFixed(2)} s`}</td>
                 </tr>
               ))}
-              {data.length === 0 && <tr><td colSpan={7} className="empty">No runs yet. Queue the first one.</td></tr>}
+              {data.length === 0 && <tr><td colSpan={9} className="empty">No runs yet. Queue the first one.</td></tr>}
             </tbody>
           </table>
         </div>
       )}
-      {creating && <NewRunForm onClose={() => setCreating(false)} />}
+      {showForm && <NewRunForm initialBuildId={requestedBuild} onClose={() => { setCreating(false); setSearchParams({}); }} />}
     </main>
   );
 }
-

@@ -1,0 +1,55 @@
+services:
+  edge:
+    image: caddy:2.10-alpine
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    ports:
+      - "127.0.0.1:${JSB1_EDGE_HTTP_PORT:-80}:80"
+      - "127.0.0.1:${JSB1_EDGE_HTTPS_PORT:-4443}:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - type: bind
+        source: ${JSB1_CADDY_ROUTES_DIR:?set JSB1_CADDY_ROUTES_DIR}
+        target: /etc/caddy/routes
+        read_only: true
+      - type: bind
+        source: ${JSB1_TLS_CERT_PATH:-/Users/yang/.cloudflare/jsb-origin.pem}
+        target: /etc/caddy/tls/jsb-origin.pem
+        read_only: true
+      - type: bind
+        source: ${JSB1_TLS_KEY_PATH:-/Users/yang/.cloudflare/jsb-origin.key}
+        target: /etc/caddy/tls/jsb-origin.key
+        read_only: true
+      - edge-data:/data
+      - edge-config:/config
+    healthcheck:
+      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  tunnel:
+    image: cloudflare/cloudflared:2026.8.2
+    command:
+      - --config
+      - /etc/cloudflared/config.yml
+      - tunnel
+      - run
+    depends_on:
+      edge:
+        condition: service_healthy
+    volumes:
+      - type: bind
+        source: ${JSB1_CLOUDFLARED_CONFIG_PATH:?set JSB1_CLOUDFLARED_CONFIG_PATH}
+        target: /etc/cloudflared/config.yml
+        read_only: true
+      - type: bind
+        source: ${JSB1_CLOUDFLARED_CREDENTIALS:?set JSB1_CLOUDFLARED_CREDENTIALS}
+        target: /etc/cloudflared/credentials.json
+        read_only: true
+    restart: unless-stopped
+
+volumes:
+  edge-data:
+  edge-config:

@@ -41,8 +41,11 @@ export function RunDetailPage() {
         <div><span className="eyebrow">{run.scenario_name}</span><h1>Run #{run.id}</h1></div>
         <StatusBadge status={run.status} />
       </div>
-      <section className="run-facts">
-        <div><span>Commit</span><code>{run.commit_sha.slice(0, 7)}</code></div>
+      <section className="run-facts run-facts--lineage">
+        <div><span>Repository</span><strong>{run.repository_name ?? "Legacy runner"}</strong></div>
+        <div><span>Branch</span><strong>{run.build_branch ?? "—"}</strong></div>
+        <div><span>Commit</span><code title={run.commit_sha ?? undefined}>{run.commit_sha?.slice(0, 10) ?? "—"}</code></div>
+        <div><span>Build</span><strong>{run.build_id ? `#${run.build_id}` : "—"}</strong></div>
         <div><span>Autopilot</span><strong>{run.autopilot}</strong></div>
         <div><span>Simulation</span><strong>{run.simulation_time_sec == null ? "—" : `${run.simulation_time_sec.toFixed(2)} s`}</strong></div>
         <div><span>Wall time</span><strong>{run.wall_time_sec == null ? "—" : `${run.wall_time_sec.toFixed(2)} s`}</strong></div>
@@ -77,4 +80,3 @@ export function RunDetailPage() {
     </main>
   );
 }
-

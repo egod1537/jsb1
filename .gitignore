@@ -18,6 +18,12 @@ frontend/*.d.ts
 data/jsb1.db*
 data/runs/*
 !data/runs/.gitkeep
+data/deployments/
+data/branch-deployments/
+data/caddy/*
+!data/caddy/deployments/
+data/caddy/deployments/*
+!data/caddy/deployments/.gitkeep
 
 # Local configuration
 .env

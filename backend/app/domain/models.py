@@ -5,6 +5,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.domain.build import Instance
+
 
 class RunStatus(StrEnum):
     QUEUED = "queued"
@@ -16,7 +18,8 @@ class RunStatus(StrEnum):
 class RunCreate(BaseModel):
     scenario: str = Field(min_length=1, max_length=255)
     autopilot: str = Field(min_length=1, max_length=64)
-    commit_sha: str = Field(min_length=1, max_length=64)
+    commit_sha: str | None = Field(default=None, min_length=1, max_length=64)
+    build_id: int | None = Field(default=None, ge=1)
 
     @field_validator("autopilot")
     @classmethod
@@ -27,7 +30,9 @@ class RunCreate(BaseModel):
 
     @field_validator("commit_sha")
     @classmethod
-    def validate_commit(cls, value: str) -> str:
+    def validate_commit(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         if not all(character in "0123456789abcdefABCDEF" for character in value):
             raise ValueError("commit_sha must be hexadecimal")
         return value.lower()
@@ -52,7 +57,11 @@ class Run(BaseModel):
 
     id: int
     status: RunStatus
-    commit_sha: str
+    repository_id: int | None = None
+    repository_name: str | None = None
+    build_id: int | None = None
+    build_branch: str | None = None
+    commit_sha: str | None
     scenario_name: str
     scenario_path: str
     autopilot: str
@@ -69,7 +78,11 @@ class Run(BaseModel):
 class RunSummary(BaseModel):
     id: int
     status: RunStatus
-    commit_sha: str
+    repository_id: int | None = None
+    repository_name: str | None = None
+    build_id: int | None = None
+    build_branch: str | None = None
+    commit_sha: str | None
     scenario_name: str
     autopilot: str
     created_at: datetime
@@ -80,6 +93,7 @@ class RunDetail(BaseModel):
     run: Run
     metrics: list[Metric]
     artifacts: list[Artifact]
+    instance: Instance | None = None
 
 
 class SignalResponse(BaseModel):

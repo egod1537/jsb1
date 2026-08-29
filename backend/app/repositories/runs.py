@@ -23,7 +23,9 @@ class RunRepository:
     def create(
         self,
         *,
-        commit_sha: str,
+        commit_sha: str | None,
+        repository_id: int | None = None,
+        build_id: int | None = None,
         scenario_name: str,
         scenario_path: str,
         autopilot: str,
@@ -31,10 +33,13 @@ class RunRepository:
         with self.database.connect() as connection:
             cursor = connection.execute(
                 """INSERT INTO runs
-                   (status, commit_sha, scenario_name, scenario_path, autopilot, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
+                   (status, repository_id, build_id, commit_sha, scenario_name,
+                    scenario_path, autopilot, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     RunStatus.QUEUED.value,
+                    repository_id,
+                    build_id,
                     commit_sha,
                     scenario_name,
                     scenario_path,
@@ -59,7 +64,15 @@ class RunRepository:
 
     def get(self, run_id: int) -> Run:
         with self.database.connect() as connection:
-            row = connection.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+            row = connection.execute(
+                """SELECT runs.*, repositories.name AS repository_name,
+                          builds.branch AS build_branch
+                   FROM runs
+                   LEFT JOIN repositories ON repositories.id = runs.repository_id
+                   LEFT JOIN builds ON builds.id = runs.build_id
+                   WHERE runs.id = ?""",
+                (run_id,),
+            ).fetchone()
         if row is None:
             raise KeyError(run_id)
         return Run.model_validate(dict(row))
@@ -74,18 +87,24 @@ class RunRepository:
         clauses: list[str] = []
         parameters: list[Any] = []
         if status is not None:
-            clauses.append("status = ?")
+            clauses.append("runs.status = ?")
             parameters.append(status.value)
         if scenario:
-            clauses.append("scenario_name = ?")
+            clauses.append("runs.scenario_name = ?")
             parameters.append(scenario)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         parameters.append(limit)
         with self.database.connect() as connection:
             rows = connection.execute(
-                f"""SELECT id, status, commit_sha, scenario_name, autopilot,
-                           created_at, wall_time_sec
-                    FROM runs {where} ORDER BY id DESC LIMIT ?""",  # noqa: S608
+                f"""SELECT runs.id, runs.status, runs.repository_id,
+                           repositories.name AS repository_name, runs.build_id,
+                           builds.branch AS build_branch, runs.commit_sha,
+                           runs.scenario_name, runs.autopilot, runs.created_at,
+                           runs.wall_time_sec
+                    FROM runs
+                    LEFT JOIN repositories ON repositories.id = runs.repository_id
+                    LEFT JOIN builds ON builds.id = runs.build_id
+                    {where} ORDER BY runs.id DESC LIMIT ?""",  # noqa: S608
                 parameters,
             ).fetchall()
         return [RunSummary.model_validate(dict(row)) for row in rows]

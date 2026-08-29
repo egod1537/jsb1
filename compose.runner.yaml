@@ -1,0 +1,10 @@
+services:
+  backend:
+    environment:
+      JSB_SIM_RUNNER_PATH: /usr/local/bin/jsb-sim-runner
+    volumes:
+      - type: bind
+        source: ./bin/jsb-sim-runner
+        target: /usr/local/bin/jsb-sim-runner
+        read_only: true
+

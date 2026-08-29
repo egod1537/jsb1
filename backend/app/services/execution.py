@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -10,6 +11,9 @@ from app.analysis.mcap_reader import McapReadError, McapRunReader
 from app.analysis.roll_hold import compute_roll_hold_metrics
 from app.domain.models import Metric, RunStatus
 from app.repositories.runs import RunRepository
+from app.repositories.builds import BuildRepository
+from app.repositories.instances import InstanceRepository
+from app.domain.build import BuildStatus
 from app.services.runner import SimulationRunner
 
 
@@ -28,11 +32,17 @@ class RunExecutionService:
         runner: SimulationRunner,
         reader: McapRunReader,
         data_dir: Path,
+        builds: BuildRepository | None = None,
+        instances: InstanceRepository | None = None,
+        build_root: Path | None = None,
     ) -> None:
         self.repository = repository
         self.runner = runner
         self.reader = reader
         self.data_dir = data_dir.resolve()
+        self.builds = builds
+        self.instances = instances
+        self.build_root = build_root.resolve() if build_root is not None else None
 
     async def execute(self, run_id: int) -> None:
         run = self.repository.get(run_id)
@@ -50,11 +60,37 @@ class RunExecutionService:
                 started_at=now_iso(),
             )
             self._write_manifest(run_id)
+            executable_path: Path | None = None
+            instance = self.instances.get_for_run(run_id) if self.instances else None
+            if run.build_id is not None:
+                if self.builds is None:
+                    raise RuntimeError("build repository is not configured")
+                build = self.builds.get(run.build_id)
+                if build.status is not BuildStatus.COMPLETED or not build.executable_path:
+                    raise RuntimeError("selected build is not completed")
+                executable_path = Path(build.executable_path).resolve()
+                if self.build_root is None:
+                    raise RuntimeError("build root is not configured")
+                build_dir = Path(build.build_dir).resolve()
+                try:
+                    build_dir.relative_to(self.build_root)
+                    executable_path.relative_to(build_dir)
+                except ValueError as exc:
+                    raise RuntimeError("selected build executable escapes build root") from exc
+                if not executable_path.is_file() or not os.access(executable_path, os.X_OK):
+                    raise FileNotFoundError("selected build executable is missing")
+
+            def on_started(pid: int) -> None:
+                if instance is not None and self.instances is not None:
+                    self.instances.mark_running(instance.id, pid)
+
             result = await self.runner.run(
                 scenario_path=Path(run.scenario_path),
                 output_directory=output_directory,
                 autopilot=run.autopilot,
                 log_path=log_path,
+                executable_path=executable_path,
+                on_started=on_started,
             )
             if log_path.exists():
                 self._register(run_id, "stdout", log_path)
@@ -103,6 +139,8 @@ class RunExecutionService:
                 error_message=None,
             )
             self._write_manifest(run_id)
+            if instance is not None and self.instances is not None:
+                self.instances.finish(instance.id, failed=False)
             logger.info("analysis completed run_id=%s", run_id)
         except asyncio.CancelledError:
             await self._fail(run_id, "backend stopped while run was active")
@@ -133,6 +171,10 @@ class RunExecutionService:
                 wall_time_sec=wall_time,
                 error_message=message[:4000],
             )
+            if self.instances is not None:
+                instance = self.instances.get_for_run(run_id)
+                if instance is not None:
+                    self.instances.finish(instance.id, failed=True)
         except Exception:
             logger.exception("could not persist failed status run_id=%s", run_id)
             return
@@ -156,7 +198,15 @@ class RunExecutionService:
         if not run.output_directory:
             return
         path = self.data_dir / run.output_directory / "run.json"
-        path.write_text(run.model_dump_json(indent=2), encoding="utf-8")
+        payload = run.model_dump(mode="json")
+        payload["repository"] = (
+            {"id": run.repository_id, "name": run.repository_name}
+            if run.repository_id is not None
+            else None
+        )
+        path.write_text(
+            json.dumps(payload, indent=2, allow_nan=False), encoding="utf-8"
+        )
         self._register(run_id, "run", path)
 
     @staticmethod

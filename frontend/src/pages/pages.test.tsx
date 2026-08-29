@@ -26,7 +26,7 @@ describe("RunsPage", () => {
     render(<MemoryRouter><RunsPage /></MemoryRouter>);
     expect(screen.getByText("Loading runs")).toBeInTheDocument();
     expect(await screen.findByText("roll.yaml")).toBeInTheDocument();
-    expect(screen.getByText("abcdef1")).toBeInTheDocument();
+    expect(screen.getByText("abcdef1234")).toBeInTheDocument();
   });
 
   it("shows API errors", async () => {

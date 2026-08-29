@@ -1,4 +1,4 @@
-import type { CreateRunInput, RunDetail, RunSummary, SignalResponse } from "../types/api";
+import type { Branch, Build, CreateRunInput, Deployment, Repository, RunDetail, RunSummary, SignalResponse } from "../types/api";
 
 export class ApiError extends Error {
   constructor(
@@ -27,6 +27,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+async function requestVoid(path: string, init?: RequestInit): Promise<void> {
+  const response = await fetch(path, init);
+  if (!response.ok) throw new ApiError(`Request failed (${response.status})`, response.status);
+}
+
 export const api = {
   scenarios: () => request<string[]>("/api/scenarios"),
   autopilots: () => request<string[]>("/api/autopilots"),
@@ -37,6 +42,26 @@ export const api = {
       method: "POST",
       body: JSON.stringify(input),
     }),
+  repositories: () => request<Repository[]>("/api/repositories"),
+  repository: (id: number) => request<Repository>(`/api/repositories/${id}`),
+  createRepository: (input: { name: string; remote_url: string; local_path: string; default_branch?: string }) =>
+    request<Repository>("/api/repositories", { method: "POST", body: JSON.stringify(input) }),
+  deleteRepository: (id: number) => requestVoid(`/api/repositories/${id}`, { method: "DELETE" }),
+  fetchRepository: (id: number) => request<Repository>(`/api/repositories/${id}/fetch`, { method: "POST" }),
+  branches: (id: number) => request<Branch[]>(`/api/repositories/${id}/branches`),
+  builds: (repositoryId?: number) => request<Build[]>(`/api/builds${repositoryId ? `?repository_id=${repositoryId}` : ""}`),
+  build: (id: number) => request<Build>(`/api/builds/${id}`),
+  createBuild: (input: { repository_id: number; revision: string; rebuild?: boolean }) =>
+    request<Build>("/api/builds", { method: "POST", body: JSON.stringify(input) }),
+  rebuild: (id: number) => request<Build>(`/api/builds/${id}/rebuild`, { method: "POST" }),
+  deployments: () => request<Deployment[]>("/api/deployments"),
+  deployment: (id: number) => request<Deployment>(`/api/deployments/${id}`),
+  createDeployment: (input: { repository_id: number; branch: string }) =>
+    request<Deployment>("/api/deployments", { method: "POST", body: JSON.stringify(input) }),
+  redeploy: (id: number) => request<Deployment>(`/api/deployments/${id}/redeploy`, { method: "POST" }),
+  restartDeployment: (id: number) => request<Deployment>(`/api/deployments/${id}/restart`, { method: "POST" }),
+  stopDeployment: (id: number, force = false) =>
+    requestVoid(`/api/deployments/${id}${force ? "?force=true" : ""}`, { method: "DELETE" }),
   signals: (id: number, channels: string[], maxPoints = 2000) => {
     const params = new URLSearchParams({
       channels: channels.join(","),

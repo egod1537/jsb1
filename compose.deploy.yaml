@@ -1,0 +1,69 @@
+services:
+  backend:
+    build:
+      context: ${JSB1_BUILD_CONTEXT:?set JSB1_BUILD_CONTEXT}
+      dockerfile: ${JSB1_DEPLOY_BACKEND_DOCKERFILE:?set JSB1_DEPLOY_BACKEND_DOCKERFILE}
+    environment:
+      JSB1_DATA_DIR: /data
+      JSB1_DATABASE_PATH: /data/jsb1.db
+      JSB_SIM_RUNNER_PATH: jsb-sim-runner
+      JSB_SCENARIO_DIR: /scenarios
+      JSB1_REPOSITORY_ROOT: /data/repositories
+      JSB1_WORKTREE_ROOT: /data/worktrees
+      JSB1_BUILD_ROOT: /data/builds
+      JSB1_DEPLOYMENT_ROOT: /data/deployments
+      JSB1_MAX_CONCURRENT_RUNS: "1"
+      JSB1_RUN_TIMEOUT_SEC: "1800"
+      JSB1_AUTOPILOTS: '["primary"]'
+      JSB1_CORS_ORIGINS: '[]'
+    volumes:
+      - type: bind
+        source: ${JSB1_DEPLOY_DATA_DIR:?set JSB1_DEPLOY_DATA_DIR}
+        target: /data
+      - type: bind
+        source: ${JSB1_SCENARIO_DIR:?set JSB1_SCENARIO_DIR}
+        target: /scenarios
+        read_only: true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)"
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 10s
+    labels:
+      net.mangagaki.jsb1.branch-slug: ${JSB1_DEPLOY_SLUG:?set JSB1_DEPLOY_SLUG}
+      net.mangagaki.jsb1.commit: ${JSB1_DEPLOY_COMMIT:?set JSB1_DEPLOY_COMMIT}
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ${JSB1_BUILD_CONTEXT}
+      dockerfile: ${JSB1_DEPLOY_FRONTEND_DOCKERFILE:?set JSB1_DEPLOY_FRONTEND_DOCKERFILE}
+      additional_contexts:
+        deploy-config: ${JSB1_DEPLOY_CONFIG_CONTEXT:?set JSB1_DEPLOY_CONFIG_CONTEXT}
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${JSB1_DEPLOY_PORT:?set JSB1_DEPLOY_PORT}:8080"
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - -q
+        - -O
+        - /dev/null
+        - http://127.0.0.1:8080/api/health
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    labels:
+      net.mangagaki.jsb1.branch-slug: ${JSB1_DEPLOY_SLUG}
+      net.mangagaki.jsb1.commit: ${JSB1_DEPLOY_COMMIT}
+      net.mangagaki.jsb1.hostname: ${JSB1_DEPLOY_HOSTNAME:?set JSB1_DEPLOY_HOSTNAME}
+    restart: unless-stopped

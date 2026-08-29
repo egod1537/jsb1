@@ -1,0 +1,65 @@
+services:
+  backend:
+    environment:
+      JSB1_DATA_DIR: ${JSB1_HOST_PROJECT_ROOT:?set JSB1_HOST_PROJECT_ROOT}/data
+      JSB1_DATABASE_PATH: ${JSB1_HOST_PROJECT_ROOT}/data/jsb1.db
+      JSB1_REPOSITORY_ROOT: ${JSB1_HOST_PROJECT_ROOT}/data/repositories
+      JSB1_WORKTREE_ROOT: ${JSB1_HOST_PROJECT_ROOT}/data/worktrees
+      JSB1_BUILD_ROOT: ${JSB1_HOST_PROJECT_ROOT}/data/builds
+      JSB1_DEPLOYMENT_ROOT: ${JSB1_HOST_PROJECT_ROOT}/data/deployments
+      JSB1_CADDY_CONFIG_PATH: /data/caddy/Caddyfile
+      JSB1_CADDY_FRAGMENTS_DIR: /data/caddy/deployments
+      JSB1_CADDY_CONTAINER: jsb1-preview-edge
+      JSB1_CADDY_UPSTREAM_HOST: 127.0.0.1
+      JSB1_CADDY_HEALTH_HOST: host.docker.internal
+      JSB1_TLS_CERT_PATH: ${JSB1_TLS_CERT_PATH:?set JSB1_TLS_CERT_PATH}
+      JSB1_TLS_KEY_PATH: ${JSB1_TLS_KEY_PATH:?set JSB1_TLS_KEY_PATH}
+      JSB1_DEPLOYMENT_PORT_START: ${JSB1_DEPLOYMENT_PORT_START:-8100}
+      JSB1_DEPLOYMENT_PORT_END: ${JSB1_DEPLOYMENT_PORT_END:-8999}
+      JSB1_DEPLOYMENT_HEALTH_HOST: host.docker.internal
+      JSB1_DEPLOYMENT_PORT_PROBE_HOST: host.docker.internal
+    volumes:
+      - type: bind
+        source: ${JSB1_HOST_PROJECT_ROOT}
+        target: ${JSB1_HOST_PROJECT_ROOT}
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+      - type: bind
+        source: ${JSB1_TLS_CERT_PATH}
+        target: ${JSB1_TLS_CERT_PATH}
+        read_only: true
+      - type: bind
+        source: ${JSB1_TLS_KEY_PATH}
+        target: ${JSB1_TLS_KEY_PATH}
+        read_only: true
+
+  web:
+    ports: !override
+      - "127.0.0.1:${JSB1_HTTP_PORT:-8081}:8080"
+
+  edge:
+    image: caddy:2-alpine
+    container_name: jsb1-preview-edge
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    network_mode: host
+    volumes:
+      - ./Caddyfile.preview:/etc/caddy/Caddyfile:ro
+      - ./data/caddy:/data/caddy
+      - type: bind
+        source: ${JSB1_TLS_CERT_PATH}
+        target: ${JSB1_TLS_CERT_PATH}
+        read_only: true
+      - type: bind
+        source: ${JSB1_TLS_KEY_PATH}
+        target: ${JSB1_TLS_KEY_PATH}
+        read_only: true
+    restart: unless-stopped
+
+  tunnel:
+    # Tunnel 766384e2-2163-4171-a021-aa6368851c9d is already run by the
+    # host launch daemon and is remotely managed by Cloudflare. Keep this
+    # container available only for explicit diagnostics to avoid a second
+    # connector with a different network namespace.
+    profiles: [manual-tunnel]

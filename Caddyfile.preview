@@ -1,0 +1,10 @@
+{
+	admin 127.0.0.1:2019
+}
+
+:80 {
+	respond /api/health 503
+	respond 404
+}
+
+import /data/caddy/deployments/*.caddy

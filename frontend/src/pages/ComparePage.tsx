@@ -40,9 +40,9 @@ export function ComparePage() {
     {runs.loading && <Loading label="Loading completed runs" />}
     {runs.error && <ErrorPanel message={runs.error} />}
     {runs.data && <section className="compare-picker">
-      <label>Run A<select value={a ?? ""} onChange={(event) => { setA(Number(event.target.value) || null); setB(null); }}><option value="">Select a run</option>{completed.map((run) => <option key={run.id} value={run.id}>#{run.id} · {run.scenario_name} · {run.commit_sha.slice(0, 7)}</option>)}</select></label>
+      <label>Run A<select value={a ?? ""} onChange={(event) => { setA(Number(event.target.value) || null); setB(null); }}><option value="">Select a run</option>{completed.map((run) => <option key={run.id} value={run.id}>#{run.id} · {run.scenario_name} · {run.commit_sha?.slice(0, 10) ?? "legacy"}</option>)}</select></label>
       <span>versus</span>
-      <label>Run B<select value={b ?? ""} disabled={!a} onChange={(event) => setB(Number(event.target.value) || null)}><option value="">Select a matching run</option>{candidatesB.map((run) => <option key={run.id} value={run.id}>#{run.id} · {run.commit_sha.slice(0, 7)}</option>)}</select></label>
+      <label>Run B<select value={b ?? ""} disabled={!a} onChange={(event) => setB(Number(event.target.value) || null)}><option value="">Select a matching run</option>{candidatesB.map((run) => <option key={run.id} value={run.id}>#{run.id} · {run.commit_sha?.slice(0, 10) ?? "legacy"}</option>)}</select></label>
     </section>}
     {error && <ErrorPanel message={error} />}
     {a && b && !details && !error && <Loading label="Building comparison" />}
@@ -57,4 +57,3 @@ export function ComparePage() {
     ]} /></section>}
   </main>;
 }
-

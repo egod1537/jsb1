@@ -2,23 +2,26 @@ import { FormEvent, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 
-export function NewRunForm({ onClose }: { onClose: () => void }) {
+export function NewRunForm({ onClose, initialBuildId }: { onClose: () => void; initialBuildId?: number }) {
   const navigate = useNavigate();
   const [scenarios, setScenarios] = useState<string[]>([]);
   const [autopilots, setAutopilots] = useState<string[]>([]);
   const [scenario, setScenario] = useState("");
   const [autopilot, setAutopilot] = useState("primary");
   const [commitSha, setCommitSha] = useState("");
+  const [builds, setBuilds] = useState<Awaited<ReturnType<typeof api.builds>>>([]);
+  const [buildId, setBuildId] = useState(initialBuildId ? String(initialBuildId) : "");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    Promise.all([api.scenarios(), api.autopilots()])
-      .then(([scenarioItems, autopilotItems]) => {
+    Promise.all([api.scenarios(), api.autopilots(), api.builds()])
+      .then(([scenarioItems, autopilotItems, buildItems]) => {
         setScenarios(scenarioItems);
         setScenario(scenarioItems[0] ?? "");
         setAutopilots(autopilotItems);
         setAutopilot(autopilotItems[0] ?? "");
+        setBuilds(buildItems.filter((item) => item.status === "completed"));
       })
       .catch((reason: Error) => setError(reason.message));
   }, []);
@@ -28,7 +31,11 @@ export function NewRunForm({ onClose }: { onClose: () => void }) {
     setSubmitting(true);
     setError(null);
     try {
-      const run = await api.createRun({ scenario, autopilot, commit_sha: commitSha });
+      const run = await api.createRun({
+        scenario,
+        autopilot,
+        ...(buildId ? { build_id: Number(buildId) } : commitSha ? { commit_sha: commitSha } : {}),
+      });
       navigate(`/runs/${run.id}`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not create run");
@@ -60,15 +67,23 @@ export function NewRunForm({ onClose }: { onClose: () => void }) {
           </select>
         </label>
         <label>
-          Commit SHA
+          Completed build
+          <select value={buildId} onChange={(event) => setBuildId(event.target.value)}>
+            <option value="">Legacy configured runner</option>
+            {builds.map((build) => <option key={build.id} value={build.id}>
+              #{build.id} · {build.repository_name} · {build.branch ?? build.commit_sha.slice(0, 10)}
+            </option>)}
+          </select>
+        </label>
+        {!buildId && <label>
+          Commit SHA (optional legacy metadata)
           <input
             value={commitSha}
             onChange={(event) => setCommitSha(event.target.value)}
             placeholder="abc1234"
             pattern="[0-9a-fA-F]+"
-            required
           />
-        </label>
+        </label>}
         {error && <p className="form-error" role="alert">{error}</p>}
         <div className="form-actions">
           <button type="button" className="button button--quiet" onClick={onClose}>Cancel</button>

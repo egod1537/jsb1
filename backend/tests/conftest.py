@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import pytest
@@ -62,9 +63,13 @@ class FakeSimulationRunner:
         output_directory: Path,
         autopilot: str,
         log_path: Path,
+        executable_path: Path | None = None,
+        on_started: Callable[[int], None] | None = None,
     ) -> RunnerResult:
         assert scenario_path.is_file()
         assert autopilot == "primary"
+        if on_started is not None:
+            on_started(4242)
         log_path.write_text("fake runner output\n", encoding="utf-8")
         if self.exit_code == 0 and self.create_telemetry:
             write_sample_mcap(output_directory / "telemetry.mcap")

@@ -11,6 +11,8 @@ from fastapi.responses import FileResponse
 from app.analysis.downsampling import uniform_downsample
 from app.analysis.mcap_reader import McapReadError, McapRunReader, canonical_name
 from app.api.dependencies import (
+    get_build_manager,
+    get_instances,
     get_app_settings,
     get_artifact_service,
     get_database,
@@ -19,16 +21,25 @@ from app.api.dependencies import (
     get_scenarios,
     get_scheduler,
 )
+from app.api.build_routes import router as build_router
+from app.api.repository_routes import router as repository_router
+from app.api.deployment_routes import router as deployment_router
 from app.config.settings import Settings
 from app.domain.models import RunCreate, RunDetail, RunStatus, SignalResponse
+from app.repositories.instances import InstanceRepository
+from app.services.build_manager import BuildManager
 from app.repositories.database import Database
 from app.repositories.runs import RunRepository
 from app.services.artifacts import ArtifactService, UnsafeArtifactPath
 from app.services.scenarios import InvalidScenario, ScenarioService
+from app.services.repository_manager import InvalidRepositoryPath
 from app.workers.scheduler import InProcessRunScheduler
 
 
 router = APIRouter(prefix="/api")
+router.include_router(repository_router)
+router.include_router(build_router)
+router.include_router(deployment_router)
 ANGULAR_SIGNALS = {
     "commanded_roll": "deg",
     "roll": "deg",
@@ -74,12 +85,14 @@ def autopilots(
 
 
 @router.post("/runs", status_code=202)
-def create_run(
+async def create_run(
     body: RunCreate,
     repository: Annotated[RunRepository, Depends(get_repository)],
     scenarios: Annotated[ScenarioService, Depends(get_scenarios)],
     scheduler: Annotated[InProcessRunScheduler, Depends(get_scheduler)],
     settings: Annotated[Settings, Depends(get_app_settings)],
+    build_manager: Annotated[BuildManager, Depends(get_build_manager)],
+    instances: Annotated[InstanceRepository, Depends(get_instances)],
 ) -> dict[str, Any]:
     try:
         scenario_path = scenarios.resolve(body.scenario)
@@ -87,16 +100,40 @@ def create_run(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if body.autopilot not in settings.autopilots:
         raise HTTPException(status_code=422, detail="unknown autopilot")
+    repository_id: int | None = None
+    commit_sha = body.commit_sha
+    if body.build_id is not None:
+        try:
+            build, _ = build_manager.require_runnable(body.build_id)
+        except (KeyError, RuntimeError, InvalidRepositoryPath) as exc:
+            status_code = 404 if isinstance(exc, KeyError) else 422
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        if commit_sha is not None and commit_sha != build.commit_sha:
+            raise HTTPException(
+                status_code=422, detail="commit_sha does not match selected build"
+            )
+        repository_id = build.repository_id
+        commit_sha = build.commit_sha
     run = repository.create(
-        commit_sha=body.commit_sha,
+        repository_id=repository_id,
+        build_id=body.build_id,
+        commit_sha=commit_sha,
         scenario_name=body.scenario,
         scenario_path=str(scenario_path),
         autopilot=body.autopilot,
     )
     relative_output = f"runs/{run.id:06d}"
     repository.set_output_directory(run.id, relative_output)
+    if body.build_id is not None:
+        instances.create(build_id=body.build_id, run_id=run.id)
     scheduler.submit(run.id)
-    return {"id": run.id, "status": RunStatus.QUEUED.value}
+    return {
+        "id": run.id,
+        "status": RunStatus.QUEUED.value,
+        "repository_id": repository_id,
+        "build_id": body.build_id,
+        "commit_sha": commit_sha,
+    }
 
 
 @router.get("/runs")
@@ -114,12 +151,14 @@ def run_detail(
     run_id: int,
     repository: Annotated[RunRepository, Depends(get_repository)],
     artifacts: Annotated[ArtifactService, Depends(get_artifact_service)],
+    instances: Annotated[InstanceRepository, Depends(get_instances)],
 ) -> RunDetail:
     run = require_run(repository, run_id)
     return RunDetail(
         run=run,
         metrics=repository.get_metrics(run_id),
         artifacts=[artifacts.public(row) for row in repository.get_artifact_rows(run_id)],
+        instance=instances.get_for_run(run_id),
     )
 
 
