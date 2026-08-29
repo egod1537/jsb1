@@ -5,6 +5,7 @@ export interface RunSummary {
   status: RunStatus;
   repository_id: number | null;
   repository_name: string | null;
+  branch: string | null;
   build_id: number | null;
   build_branch: string | null;
   commit_sha: string | null;
@@ -56,8 +57,18 @@ export interface SignalResponse {
 export interface CreateRunInput {
   scenario: string;
   autopilot: string;
-  commit_sha?: string;
-  build_id?: number;
+  branch: string;
+}
+
+export interface CreateRunResponse {
+  id: number;
+  status: RunStatus;
+  repository_id: number | null;
+  branch: string | null;
+  commit_sha: string | null;
+  build_id: number | null;
+  build_status: BuildStatus | null;
+  build_reused: boolean;
 }
 
 export interface Repository {

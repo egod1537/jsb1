@@ -18,8 +18,8 @@ export function RunsPage() {
   const { data, loading, error } = useRuns();
   const [creating, setCreating] = useState(false);
   const [searchParams, setSearchParams] = useSearchParams();
-  const requestedBuild = Number(searchParams.get("build_id")) || undefined;
-  const showForm = creating || requestedBuild !== undefined;
+  const requestedBranch = searchParams.get("branch") || undefined;
+  const showForm = creating || searchParams.get("new") === "1";
   return (
     <main>
       <PageHeader
@@ -34,7 +34,7 @@ export function RunsPage() {
         <div className="table-shell">
           <HTMLTable compact interactive striped>
             <thead><tr>
-              <th>ID</th><th>Status</th><th>Scenario</th><th>Repository</th><th>Build</th><th>Commit</th>
+              <th>ID</th><th>Status</th><th>Scenario</th><th>Repository</th><th>Branch</th><th>Build</th><th>Commit</th>
               <th>Autopilot</th><th>Created</th><th>Duration</th>
             </tr></thead>
             <tbody>
@@ -44,18 +44,19 @@ export function RunsPage() {
                   <td><StatusTag status={run.status} /></td>
                   <td><Link to={`/runs/${run.id}`}>{run.scenario_name}</Link></td>
                   <td>{run.repository_name ?? "Legacy"}</td>
+                  <td className="technical-value">{run.branch ?? run.build_branch ?? "—"}</td>
                   <td className="technical-value">{run.build_id ? <Link to={`/builds?selected=${run.build_id}`}>#{run.build_id}</Link> : "—"}</td>
                   <td><code title={run.commit_sha ?? undefined}>{run.commit_sha?.slice(0, 10) ?? "—"}</code></td>
                   <td className="technical-value">{run.autopilot}</td><td className="technical-value">{time(run.created_at)}</td>
                   <td className="technical-value">{run.wall_time_sec == null ? "—" : `${run.wall_time_sec.toFixed(2)} s`}</td>
                 </tr>
               ))}
-              {data.length === 0 && <tr><td colSpan={9} className="empty">No runs yet. Queue the first one.</td></tr>}
+              {data.length === 0 && <tr><td colSpan={10} className="empty">No runs yet. Queue the first one.</td></tr>}
             </tbody>
           </HTMLTable>
         </div>
       )}
-      {showForm && <NewRunForm initialBuildId={requestedBuild} onClose={() => { setCreating(false); setSearchParams({}); }} />}
+      {showForm && <NewRunForm initialBranch={requestedBranch} onClose={() => { setCreating(false); setSearchParams({}); }} />}
     </main>
   );
 }

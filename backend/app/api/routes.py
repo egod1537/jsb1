@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import shutil
 from pathlib import Path
 from typing import Annotated, Any
@@ -12,6 +13,7 @@ from app.analysis.downsampling import uniform_downsample
 from app.analysis.mcap_reader import McapReadError, McapRunReader, canonical_name
 from app.api.dependencies import (
     get_build_manager,
+    get_build_scheduler,
     get_build_info,
     get_instances,
     get_app_settings,
@@ -19,11 +21,13 @@ from app.api.dependencies import (
     get_database,
     get_reader,
     get_repository,
+    get_repository_manager,
     get_scenarios,
     get_scheduler,
 )
 from app.api.build_routes import router as build_router
 from app.api.repository_routes import router as repository_router
+from app.api.runtime_routes import router as runtime_router
 from app.api.deployment_routes import router as deployment_router
 from app.config.settings import Settings
 from app.domain.models import RunCreate, RunDetail, RunStatus, SignalResponse
@@ -34,12 +38,19 @@ from app.repositories.database import Database
 from app.repositories.runs import RunRepository
 from app.services.artifacts import ArtifactService, UnsafeArtifactPath
 from app.services.scenarios import InvalidScenario, ScenarioService
-from app.services.repository_manager import InvalidRepositoryPath
+from app.services.repository_manager import (
+    GitOperationError,
+    InvalidRepositoryPath,
+    RepositoryManager,
+    RuntimeRepositoryNotConfigured,
+)
+from app.workers.build_scheduler import InProcessBuildScheduler
 from app.workers.scheduler import InProcessRunScheduler
 
 
 router = APIRouter(prefix="/api")
 router.include_router(repository_router)
+router.include_router(runtime_router)
 router.include_router(build_router)
 router.include_router(deployment_router)
 ANGULAR_SIGNALS = {
@@ -99,6 +110,8 @@ async def create_run(
     scheduler: Annotated[InProcessRunScheduler, Depends(get_scheduler)],
     settings: Annotated[Settings, Depends(get_app_settings)],
     build_manager: Annotated[BuildManager, Depends(get_build_manager)],
+    build_scheduler: Annotated[InProcessBuildScheduler, Depends(get_build_scheduler)],
+    repository_manager: Annotated[RepositoryManager, Depends(get_repository_manager)],
     instances: Annotated[InstanceRepository, Depends(get_instances)],
 ) -> dict[str, Any]:
     try:
@@ -108,8 +121,76 @@ async def create_run(
     if body.autopilot not in settings.autopilots:
         raise HTTPException(status_code=422, detail="unknown autopilot")
     repository_id: int | None = None
+    branch: str | None = None
     commit_sha = body.commit_sha
-    if body.build_id is not None:
+    build_id = body.build_id
+    build_reused = False
+    build_status: str | None = None
+    if body.branch is not None:
+        configured_runtime = body.repository_id is None
+        if configured_runtime:
+            try:
+                runtime_repository = await asyncio.to_thread(
+                    repository_manager.runtime_repository,
+                    settings.runtime_repository_name,
+                )
+            except RuntimeRepositoryNotConfigured as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+            except (GitOperationError, InvalidRepositoryPath) as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="JSB0 Runtime repository is not configured",
+                ) from exc
+            repository_id = runtime_repository.id
+        else:
+            repository_id = body.repository_id
+        assert repository_id is not None
+        try:
+            await asyncio.to_thread(repository_manager.fetch, repository_id)
+        except KeyError as exc:
+            detail = (
+                "JSB0 Runtime repository is not configured"
+                if configured_runtime
+                else "repository not found"
+            )
+            raise HTTPException(status_code=404, detail=detail) from exc
+        except (GitOperationError, InvalidRepositoryPath) as exc:
+            detail = (
+                "Could not refresh JSB0 branches"
+                if configured_runtime
+                else str(exc)
+            )
+            raise HTTPException(
+                status_code=502 if configured_runtime else 422, detail=detail
+            ) from exc
+        try:
+            resolved = await asyncio.to_thread(
+                repository_manager.resolve_branch, repository_id, body.branch
+            )
+        except GitOperationError as exc:
+            if str(exc).startswith("branch not found:"):
+                raise HTTPException(
+                    status_code=404, detail="Branch no longer exists"
+                ) from exc
+            detail = "Could not resolve JSB0 branch" if configured_runtime else str(exc)
+            raise HTTPException(status_code=422, detail=detail) from exc
+        except (KeyError, InvalidRepositoryPath) as exc:
+            detail = (
+                "Could not resolve JSB0 branch" if configured_runtime else str(exc)
+            )
+            raise HTTPException(status_code=422, detail=detail) from exc
+        try:
+            build, build_reused = await asyncio.to_thread(
+                build_manager.request_resolved, resolved
+            )
+        except (KeyError, InvalidRepositoryPath, RuntimeError) as exc:
+            status_code = 404 if isinstance(exc, KeyError) else 422
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        branch = body.branch
+        commit_sha = resolved.commit_sha
+        build_id = build.id
+        build_status = build.status.value
+    elif body.build_id is not None:
         try:
             build, _ = build_manager.require_runnable(body.build_id)
         except (KeyError, RuntimeError, InvalidRepositoryPath) as exc:
@@ -123,7 +204,8 @@ async def create_run(
         commit_sha = build.commit_sha
     run = repository.create(
         repository_id=repository_id,
-        build_id=body.build_id,
+        branch=branch,
+        build_id=build_id,
         commit_sha=commit_sha,
         scenario_name=body.scenario,
         scenario_path=str(scenario_path),
@@ -131,14 +213,23 @@ async def create_run(
     )
     relative_output = f"runs/{run.id:06d}"
     repository.set_output_directory(run.id, relative_output)
-    if body.build_id is not None:
-        instances.create(build_id=body.build_id, run_id=run.id)
-    scheduler.submit(run.id)
+    if build_id is not None:
+        instances.create(build_id=build_id, run_id=run.id)
+    if branch is not None and not build_reused:
+        assert build_id is not None
+        build_scheduler.submit(build_id)
+    scheduler.submit(
+        run.id,
+        wait_for_build_id=build_id if branch is not None else None,
+    )
     return {
         "id": run.id,
         "status": RunStatus.QUEUED.value,
         "repository_id": repository_id,
-        "build_id": body.build_id,
+        "branch": branch,
+        "build_id": build_id,
+        "build_status": build_status,
+        "build_reused": build_reused,
         "commit_sha": commit_sha,
     }
 

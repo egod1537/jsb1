@@ -27,6 +27,13 @@ log() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S%z')" "$*"
 }
 
+cleanup_crontab_files() {
+  local current_crontab="${1:-}"
+  local next_crontab="${2:-}"
+  [[ -z "$current_crontab" ]] || rm -f -- "$current_crontab"
+  [[ -z "$next_crontab" ]] || rm -f -- "$next_crontab"
+}
+
 list_remote_heads() {
   git -C "$REPO_ROOT" ls-remote --heads origin
 }
@@ -186,7 +193,7 @@ install_watcher() {
   init_state
   mkdir -p "$AUTO_LOG_DIR"
 
-  local current_crontab next_crontab cron_command auto_main retry_seconds stale_grace builder_assignment
+  local current_crontab="" next_crontab="" cron_command auto_main retry_seconds stale_grace builder_assignment grep_status
   auto_main="${JSB1_AUTO_DEPLOY_MAIN:-false}"
   retry_seconds="${JSB1_AUTO_DEPLOY_RETRY_SEC:-300}"
   stale_grace="${JSB1_STALE_BRANCH_GRACE_SEC:-86400}"
@@ -199,17 +206,29 @@ install_watcher() {
     [[ "$DEPLOY_BUILDER" =~ ^[A-Za-z0-9_.-]+$ ]] || die "invalid JSB1_DEPLOY_BUILDER name"
     builder_assignment=" JSB1_DEPLOY_BUILDER=$DEPLOY_BUILDER"
   fi
-  current_crontab="$(mktemp "${TMPDIR:-/tmp}/jsb1-current-crontab.XXXXXX")"
-  next_crontab="$(mktemp "${TMPDIR:-/tmp}/jsb1-next-crontab.XXXXXX")"
-  cron_cleanup() {
-    rm -f "$current_crontab" "$next_crontab"
-  }
-  trap cron_cleanup RETURN
+  current_crontab="$(mktemp "${TMPDIR:-/tmp}/jsb1-current-crontab.XXXXXX")" \
+    || die "could not create temporary current crontab file"
+  if ! next_crontab="$(mktemp "${TMPDIR:-/tmp}/jsb1-next-crontab.XXXXXX")"; then
+    cleanup_crontab_files "$current_crontab" "$next_crontab"
+    die "could not create temporary next crontab file"
+  fi
   crontab -l >"$current_crontab" 2>/dev/null || true
-  grep -Fv "$AUTO_CRON_TAG" "$current_crontab" >"$next_crontab" || true
+  grep_status=0
+  grep -Fv "$AUTO_CRON_TAG" "$current_crontab" >"$next_crontab" || grep_status=$?
+  if (( grep_status > 1 )); then
+    cleanup_crontab_files "$current_crontab" "$next_crontab"
+    die "could not filter the existing crontab"
+  fi
   cron_command="* * * * * HOME=$HOME PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin JSB1_AUTO_DEPLOY_MAIN=$auto_main JSB1_AUTO_DEPLOY_RETRY_SEC=$retry_seconds JSB1_STALE_BRANCH_GRACE_SEC=$stale_grace$builder_assignment /bin/bash $SCRIPT_DIR/auto-deploy.sh --once >> $AUTO_LOG_FILE 2>&1 $AUTO_CRON_TAG"
-  printf '%s\n' "$cron_command" >>"$next_crontab"
-  crontab "$next_crontab"
+  if ! printf '%s\n' "$cron_command" >>"$next_crontab"; then
+    cleanup_crontab_files "$current_crontab" "$next_crontab"
+    die "could not write the automatic deployment cron entry"
+  fi
+  if ! crontab "$next_crontab"; then
+    cleanup_crontab_files "$current_crontab" "$next_crontab"
+    die "could not install the automatic deployment cron entry"
+  fi
+  cleanup_crontab_files "$current_crontab" "$next_crontab"
 
   # Remove a plist left by the older LaunchAgent installer. It cannot run in a
   # headless login session and is superseded by the cron entry above.

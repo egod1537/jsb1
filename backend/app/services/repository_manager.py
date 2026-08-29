@@ -24,6 +24,10 @@ class GitOperationError(RuntimeError):
     pass
 
 
+class RuntimeRepositoryNotConfigured(RuntimeError):
+    pass
+
+
 class RepositoryManager:
     def __init__(
         self,
@@ -98,6 +102,16 @@ class RepositoryManager:
                     )
                 )
         return result
+
+    def runtime_repository(self, configured_name: str) -> RepositoryStatus:
+        """Return the single platform-configured JSB0 Runtime repository."""
+        try:
+            record = self.repository.get_by_name(configured_name)
+        except KeyError as exc:
+            raise RuntimeRepositoryNotConfigured(
+                "JSB0 Runtime repository is not configured"
+            ) from exc
+        return self.status(record.id)
 
     def fetch(self, repository_id: int) -> RepositoryStatus:
         record = self.repository.get(repository_id)

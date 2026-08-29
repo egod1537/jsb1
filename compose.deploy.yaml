@@ -18,12 +18,13 @@ services:
       JSB_SIM_RUNNER_PATH: jsb-sim-runner
       JSB_SCENARIO_DIR: /scenarios
       JSB1_REPOSITORY_ROOT: /data/repositories
+      JSB1_RUNTIME_REPOSITORY_NAME: ${JSB1_RUNTIME_REPOSITORY_NAME:-jsb0}
       JSB1_WORKTREE_ROOT: /data/worktrees
       JSB1_BUILD_ROOT: /data/builds
       JSB1_DEPLOYMENT_ROOT: /data/deployments
       JSB1_MAX_CONCURRENT_RUNS: "1"
       JSB1_RUN_TIMEOUT_SEC: "1800"
-      JSB1_AUTOPILOTS: '["primary"]'
+      JSB1_AUTOPILOTS: '["baseline","primary"]'
       JSB1_CORS_ORIGINS: '[]'
       JSB1_DEPLOY_BRANCH: ${JSB1_DEPLOY_BRANCH:?set JSB1_DEPLOY_BRANCH}
       JSB1_DEPLOY_COMMIT: ${JSB1_DEPLOY_COMMIT:?set JSB1_DEPLOY_COMMIT}

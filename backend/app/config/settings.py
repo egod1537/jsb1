@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     max_concurrent_runs: int = Field(1, alias="JSB1_MAX_CONCURRENT_RUNS", ge=1, le=32)
     run_timeout_sec: float = Field(1800.0, alias="JSB1_RUN_TIMEOUT_SEC", gt=0)
     repository_root: Path | None = Field(None, alias="JSB1_REPOSITORY_ROOT")
+    # JSB1 currently operates against one configured JSB0 Runtime repository.
+    runtime_repository_name: str = Field(
+        "jsb0", alias="JSB1_RUNTIME_REPOSITORY_NAME", min_length=1, max_length=100
+    )
     worktree_root: Path | None = Field(None, alias="JSB1_WORKTREE_ROOT")
     deployment_root: Path | None = Field(None, alias="JSB1_DEPLOYMENT_ROOT")
     deployment_port_start: int = Field(
@@ -79,7 +83,9 @@ class Settings(BaseSettings):
     build_executable_relative_path: Path = Field(
         Path("jsb-sim-runner"), alias="JSB1_BUILD_EXECUTABLE_RELATIVE_PATH"
     )
-    autopilots: list[str] = Field(default_factory=lambda: ["primary"], alias="JSB1_AUTOPILOTS")
+    autopilots: list[str] = Field(
+        default_factory=lambda: ["baseline", "primary"], alias="JSB1_AUTOPILOTS"
+    )
     cors_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"],
         alias="JSB1_CORS_ORIGINS",
@@ -98,6 +104,11 @@ class Settings(BaseSettings):
         if isinstance(value, str) and not value.lstrip().startswith("["):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
+
+    @field_validator("autopilots")
+    @classmethod
+    def require_standard_autopilots(cls, value: list[str]) -> list[str]:
+        return list(dict.fromkeys(["baseline", "primary", *value]))
 
     @property
     def resolved_database_path(self) -> Path:

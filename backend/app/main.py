@@ -108,7 +108,9 @@ def create_app(
             instances,
             app_settings.resolved_build_root,
         )
-        scheduler = InProcessRunScheduler(execution, app_settings.max_concurrent_runs)
+        scheduler = InProcessRunScheduler(
+            execution, app_settings.max_concurrent_runs, build_scheduler
+        )
         app.state.settings = app_settings
         app.state.build_info = build_info
         app.state.database = database

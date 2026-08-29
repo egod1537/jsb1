@@ -69,6 +69,7 @@ Vite serves the UI at `http://localhost:5173` and proxies `/api` to `http://127.
 | `JSB1_MAX_CONCURRENT_RUNS` | `1` | subprocess concurrency bound |
 | `JSB1_RUN_TIMEOUT_SEC` | `1800` | per-run timeout |
 | `JSB1_REPOSITORY_ROOT` | `<data>/repositories` | canonical JSB0 clone root |
+| `JSB1_RUNTIME_REPOSITORY_NAME` | `jsb0` | single registered repository used as the JSB0 Runtime |
 | `JSB1_WORKTREE_ROOT` | `<data>/worktrees` | detached commit worktrees |
 | `JSB1_DEPLOYMENT_ROOT` | `<data>/deployments` | generated per-revision Compose overrides |
 | `JSB1_BUILD_ROOT` | `<data>/builds` | immutable build outputs and logs |
@@ -76,7 +77,7 @@ Vite serves the UI at `http://localhost:5173` and proxies `/api` to `http://127.
 | `JSB1_BUILD_JOBS` | `2` | jobs passed to `cmake --build -j` |
 | `JSB1_BUILD_TIMEOUT_SEC` | `3600` | timeout for each CMake command |
 | `JSB1_BUILD_EXECUTABLE_RELATIVE_PATH` | `jsb-sim-runner` | fixed executable path beneath each build directory |
-| `JSB1_AUTOPILOTS` | `["primary"]` | JSON whitelist accepted by the API |
+| `JSB1_AUTOPILOTS` | `["baseline","primary"]` | runner strategy whitelist; both standard strategies are always available |
 | `JSB1_CORS_ORIGINS` | localhost Vite origins | JSON list of allowed development origins |
 
 ## Docker
@@ -163,6 +164,8 @@ The database stores paths relative to `JSB1_DATA_DIR`. Artifact responses expose
 - `GET /api/version`
 - `GET /api/scenarios`
 - `GET /api/autopilots`
+- `GET /api/runtime/repository`
+- `GET /api/runtime/branches`
 - `POST /api/runs`
 - `GET /api/runs?status=&scenario=&limit=`
 - `GET /api/runs/{id}`
@@ -188,10 +191,33 @@ The HTTP API never accepts a build command or executable path. Set
 build directory. Completed builds are reused by repository and commit; the rebuild
 endpoint creates a fresh build record and directory.
 
-Passing `build_id` to `POST /api/runs` selects that completed build's validated
-executable. Omitting it preserves the legacy `JSB_SIM_RUNNER_PATH` behavior. Run
-records and `run.json` retain repository, build, branch, and commit lineage even if
-the canonical repository later changes branches or advances HEAD.
+JSB1 currently operates against one configured JSB0 Runtime repository. The
+preferred `POST /api/runs` contract accepts only the branch instead of a user-selected
+repository, build, or commit:
+
+```json
+{
+  "branch": "backend",
+  "scenario": "roll_hold_5deg.yaml",
+  "autopilot": "baseline"
+}
+```
+
+At queue time the backend finds the registered repository named by
+`JSB1_RUNTIME_REPOSITORY_NAME`, fetches it, and resolves the branch again (preferring
+`origin/<branch>`). It stores the runtime repository, requested branch, and immutable
+full commit SHA, then looks up a completed build by repository and commit. A cache
+hit is reused. On a miss, the build is queued
+and the run remains queued until that build finishes, then executes automatically.
+`baseline` and `primary` are passed unchanged to the validated runner's
+`--autopilot` argument so the same repository/commit/scenario can compare control
+strategies.
+
+The legacy optional `repository_id`, `build_id`, and `commit_sha` request fields
+remain accepted for existing clients and historical data. New UI flows do not expose
+them. Run records and `run.json` retain repository, requested branch, build, and
+commit lineage even if the canonical repository later changes branches or advances
+HEAD.
 
 Signal responses are capped at 20,000 points and 20 channels. v0 uses uniform index downsampling and never changes the MCAP source.
 
@@ -341,18 +367,22 @@ fall back to `dev` / `unknown` without inspecting Git or a remote branch.
 
 ### GitHub deployment reporting
 
-Deployment reporting is an optional observability layer over the existing pipeline.
+GitHub reporting is an optional observability layer over the existing pipeline.
 Give the deployment host a fine-grained personal access token or GitHub App token
-with repository **Deployments: write** permission, then expose it only to the host
-process running the deployment:
+with these repository permissions, then expose it only to the host process running
+the deployment:
+
+- **Deployments: Read and write**
+- **Commit statuses: Read and write**
+- **Metadata: Read-only** (required automatically by GitHub)
 
 ```sh
 export JSB1_GITHUB_TOKEN='...'
 ./deploy.sh impl
 ```
 
-A classic personal access token requires `repo_deployment` (or the broader `repo`
-scope), but the fine-grained permission is preferred.
+A classic personal access token needs the broader `repo` scope to cover both APIs;
+a fine-grained token is preferred.
 
 `GITHUB_TOKEN` is accepted as a fallback. The token is never passed to Compose,
 Docker builds, the frontend, or `/api/version`, and is never saved in deployment
@@ -361,12 +391,18 @@ An installed automatic watcher must receive the token from its own secure host
 process environment; `auto-deploy.sh --install` intentionally does not copy secrets
 into the generated crontab.
 
-After `deploy.sh` resolves the immutable SHA, it creates a GitHub Deployment in
-`jsb1/<branch-slug>` and reports `in_progress`. Only successful `/api/version` and
-public HTTPS verification cause `success`, with the actual site stored as the
-environment URL. A later commit or explicit rollback creates another Deployment in
-the same environment, preserving commit history. Successful undeploy reports the
-latest recorded Deployment as `inactive`; Deployment objects are never deleted.
+After `deploy.sh` resolves the immutable SHA, it reports through both APIs:
+
+- **Deployment API** records `jsb1/<branch-slug>` environment lifecycle, deployment
+  history, immutable commit, and environment URL.
+- **Commit Status API** records `pending`, `success`, or `failure` on that exact SHA
+  with context `jsb1/deploy/<branch-slug>` and links to the deployed site.
+
+Only successful `/api/version`, Caddy, Cloudflare routing, and public HTTPS
+verification cause Deployment and Commit Status `success`. A later commit creates
+new records for its SHA; an explicit rollback reports against the selected old SHA.
+Successful undeploy reports only the latest Deployment as `inactive`; it does not
+rewrite the commit's deploy-attempt result. Deployment objects are never deleted.
 For example:
 
 ```text
@@ -381,16 +417,16 @@ only when desired:
 export JSB1_GITHUB_DEPLOYMENT_REQUIRED=true
 ```
 
-The status table reads the locally recorded GitHub state without making API calls:
+The status table reads both locally recorded GitHub states without making API calls:
 
 ```sh
 ./deploy.sh --status
 ```
 
-In GitHub, open the repository's **Deployments** or **Environments** view to see the
-commit history, current status, and **View deployment** link. Commit Status API is
-not also emitted: Deployment API already provides the required lifecycle and URL,
-while avoiding duplicate status UI and an extra `Commit statuses: write` permission.
+In GitHub, open **Deployments** or **Environments** for environment history and the
+current active deployment. Open a branch, commit list, commit detail, or related pull
+request to see the Commit Status indicator; its details link opens the matching
+`https://<branch>-jsb.mangagaki.net` site.
 
 ### Automatic deployment after push
 

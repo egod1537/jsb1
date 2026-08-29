@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.domain.build import Instance
 
@@ -18,8 +18,20 @@ class RunStatus(StrEnum):
 class RunCreate(BaseModel):
     scenario: str = Field(min_length=1, max_length=255)
     autopilot: str = Field(min_length=1, max_length=64)
+    repository_id: int | None = Field(default=None, ge=1)
+    branch: str | None = Field(default=None, min_length=1, max_length=255)
     commit_sha: str | None = Field(default=None, min_length=1, max_length=64)
     build_id: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def validate_revision_source(self) -> RunCreate:
+        if self.repository_id is not None and self.branch is None:
+            raise ValueError("repository_id requires branch")
+        if self.branch is not None and (
+            self.commit_sha is not None or self.build_id is not None
+        ):
+            raise ValueError("branch-based runs cannot specify commit_sha or build_id")
+        return self
 
     @field_validator("autopilot")
     @classmethod
@@ -59,6 +71,7 @@ class Run(BaseModel):
     status: RunStatus
     repository_id: int | None = None
     repository_name: str | None = None
+    branch: str | None = None
     build_id: int | None = None
     build_branch: str | None = None
     commit_sha: str | None
@@ -80,6 +93,7 @@ class RunSummary(BaseModel):
     status: RunStatus
     repository_id: int | None = None
     repository_name: str | None = None
+    branch: str | None = None
     build_id: int | None = None
     build_branch: str | None = None
     commit_sha: str | None

@@ -59,6 +59,22 @@ class PayloadTests(unittest.TestCase):
                 self.assertEqual(payload["environment_url"], "https://impl-jsb.mangagaki.net")
                 self.assertEqual(payload["auto_inactive"], state == "success")
 
+    def test_commit_status_payloads_cover_lifecycle_and_target(self) -> None:
+        for state in ("pending", "success", "failure"):
+            with self.subTest(state=state):
+                payload = github_deployment.commit_status_payload(
+                    state,
+                    "jsb1/deploy/feature-foo",
+                    f"Deployment {state}",
+                    "https://feature-foo-jsb.mangagaki.net",
+                )
+                self.assertEqual(payload["state"], state)
+                self.assertEqual(payload["context"], "jsb1/deploy/feature-foo")
+                self.assertEqual(
+                    payload["target_url"],
+                    "https://feature-foo-jsb.mangagaki.net",
+                )
+
     @mock.patch("github_deployment.urllib.request.urlopen")
     def test_api_request_serializes_json_and_authenticates_without_payload_token(
         self, urlopen: mock.Mock
@@ -117,6 +133,44 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(output.getvalue().strip(), "2718")
         self.assertEqual(request.call_args.args[2]["ref"], ROLLBACK_COMMIT)
+
+    @mock.patch.dict(os.environ, {"JSB1_GITHUB_TOKEN": "test-token"}, clear=True)
+    @mock.patch.object(github_deployment, "api_request")
+    def test_commit_status_uses_exact_sha_context_and_target(
+        self, request: mock.Mock
+    ) -> None:
+        for commit in (COMMIT, ROLLBACK_COMMIT):
+            with self.subTest(commit=commit):
+                result = github_deployment.main(
+                    [
+                        "--repository",
+                        "egod1537/jsb1",
+                        "status-commit",
+                        "--commit",
+                        commit,
+                        "--state",
+                        "success",
+                        "--context",
+                        "jsb1/deploy/impl",
+                        "--description",
+                        "Deployment successful",
+                        "--target-url",
+                        "https://impl-jsb.mangagaki.net",
+                    ]
+                )
+                self.assertEqual(result, 0)
+                self.assertEqual(
+                    request.call_args.args[1],
+                    f"/repos/egod1537/jsb1/statuses/{commit}",
+                )
+                self.assertEqual(request.call_args.args[2]["state"], "success")
+                self.assertEqual(
+                    request.call_args.args[2]["context"], "jsb1/deploy/impl"
+                )
+                self.assertEqual(
+                    request.call_args.args[2]["target_url"],
+                    "https://impl-jsb.mangagaki.net",
+                )
 
     @mock.patch.dict(os.environ, {}, clear=True)
     def test_missing_token_is_concise_and_fails_helper(self) -> None:

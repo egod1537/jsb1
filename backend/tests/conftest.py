@@ -67,7 +67,7 @@ class FakeSimulationRunner:
         on_started: Callable[[int], None] | None = None,
     ) -> RunnerResult:
         assert scenario_path.is_file()
-        assert autopilot == "primary"
+        assert autopilot in {"baseline", "primary"}
         if on_started is not None:
             on_started(4242)
         log_path.write_text("fake runner output\n", encoding="utf-8")

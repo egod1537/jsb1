@@ -21,6 +21,7 @@ import { PageHeader } from "../components/PageHeader";
 import { StatusTag } from "../components/StatusTag";
 import { showSuccess } from "../components/toast";
 import type { Branch, Deployment, Repository } from "../types/api";
+import { uniqueBranches } from "../utils/branches";
 
 export function DeploymentsPage() {
   const [items, setItems] = useState<Deployment[] | null>(null);
@@ -58,12 +59,7 @@ export function DeploymentsPage() {
     }
     void api.branches(repositoryId)
       .then((records) => {
-        const unique = new Map<string, Branch>();
-        for (const branch of records) {
-          const previous = unique.get(branch.name);
-          if (!previous || (previous.remote && !branch.remote)) unique.set(branch.name, branch);
-        }
-        setBranches([...unique.values()].sort((a, b) => a.name.localeCompare(b.name)));
+        setBranches(uniqueBranches(records));
       })
       .catch((reason: Error) => setError(reason.message));
   }, [repositoryId]);

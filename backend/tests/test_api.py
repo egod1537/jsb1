@@ -1,15 +1,60 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import time
+from pathlib import Path
 
 from app.domain.build import BuildStatus
+from app.domain.repository import RepositoryCreate
 from app.repositories.runs import utc_now
 
 from fastapi.testclient import TestClient
 
 from app.main import create_app
 from tests.conftest import FakeSimulationRunner
+
+
+def git(*args: str, cwd: Path) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def create_jsb0_fixture(source: Path) -> tuple[str, str]:
+    source.mkdir(parents=True)
+    git("init", "-b", "main", cwd=source)
+    git("config", "user.email", "jsb1@example.test", cwd=source)
+    git("config", "user.name", "JSB1 Test", cwd=source)
+    (source / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.16)\nproject(jsb0 NONE)\n",
+        encoding="utf-8",
+    )
+    (source / "version.txt").write_text("main\n", encoding="utf-8")
+    git("add", ".", cwd=source)
+    git("commit", "-m", "main", cwd=source)
+    git("switch", "-c", "backend", cwd=source)
+    (source / "version.txt").write_text("backend-v1\n", encoding="utf-8")
+    git("add", ".", cwd=source)
+    git("commit", "-m", "backend v1", cwd=source)
+    return git("rev-parse", "main", cwd=source), git("rev-parse", "HEAD", cwd=source)
+
+
+def install_fake_cmake(directory: Path) -> None:
+    binary = directory / "cmake"
+    binary.write_text(
+        """#!/bin/sh
+set -eu
+if [ "${1:-}" = "--build" ]; then
+  build_dir="$2"
+  printf '#!/bin/sh\\nexit 0\\n' > "$build_dir/jsb-sim-runner"
+  chmod +x "$build_dir/jsb-sim-runner"
+fi
+""",
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
 
 
 def wait_for_terminal(client: TestClient, run_id: int) -> dict:
@@ -70,6 +115,7 @@ def test_successful_run_flow_and_signal_api(settings) -> None:
         run_id = response.json()["id"]
         detail = wait_for_terminal(client, run_id)
         assert detail["run"]["status"] == "completed"
+        assert detail["run"]["branch"] is None
         assert detail["run"]["build_id"] is None
         assert len(detail["metrics"]) == 5
         assert {item["kind"] for item in detail["artifacts"]} >= {"telemetry", "metrics", "run", "stdout"}
@@ -158,3 +204,130 @@ def test_build_backed_run_persists_repository_lineage(settings) -> None:
         payload = json.loads(manifest.read_text(encoding="utf-8"))
         assert payload["repository"] == {"id": repository.id, "name": "jsb0"}
         assert payload["build_id"] == build.id
+
+
+def test_runtime_repository_configuration_is_required_for_branch_runs(settings) -> None:
+    with TestClient(create_app(settings, FakeSimulationRunner())) as client:
+        repository = client.get("/api/runtime/repository")
+        assert repository.status_code == 503
+        assert repository.json()["detail"] == "JSB0 Runtime repository is not configured"
+        branches = client.get("/api/runtime/branches")
+        assert branches.status_code == 503
+        response = client.post(
+            "/api/runs",
+            json={
+                "branch": "backend",
+                "scenario": "roll_hold_5deg.yaml",
+                "autopilot": "baseline",
+            },
+        )
+        assert response.status_code == 503
+        assert response.json()["detail"] == "JSB0 Runtime repository is not configured"
+
+
+def test_branch_run_resolves_revision_reuses_build_and_preserves_history(
+    settings, tmp_path: Path, monkeypatch
+) -> None:
+    with TestClient(create_app(settings, FakeSimulationRunner())) as client:
+        source = settings.resolved_repository_root / "jsb0"
+        _, backend_v1 = create_jsb0_fixture(source)
+        registered = client.app.state.repository_manager.register(
+            RepositoryCreate(
+                name="jsb0",
+                remote_url="local-fixture",
+                local_path="jsb0",
+                default_branch="main",
+            )
+        )
+        tools = tmp_path / "tools"
+        tools.mkdir()
+        install_fake_cmake(tools)
+        monkeypatch.setenv("PATH", f"{tools}{os.pathsep}{os.environ['PATH']}")
+
+        assert client.get("/api/autopilots").json()[:2] == ["baseline", "primary"]
+        runtime = client.get("/api/runtime/repository")
+        assert runtime.status_code == 200
+        assert runtime.json()["id"] == registered.id
+        assert runtime.json()["name"] == "jsb0"
+        assert {item["name"] for item in client.get("/api/runtime/branches").json()} >= {
+            "backend",
+            "main",
+        }
+        missing = client.post(
+            "/api/runs",
+            json={
+                "branch": "missing",
+                "scenario": "roll_hold_5deg.yaml",
+                "autopilot": "baseline",
+            },
+        )
+        assert missing.status_code == 404
+        assert missing.json()["detail"] == "Branch no longer exists"
+
+        baseline = client.post(
+            "/api/runs",
+            json={
+                "branch": "backend",
+                "scenario": "roll_hold_5deg.yaml",
+                "autopilot": "baseline",
+            },
+        )
+        assert baseline.status_code == 202
+        baseline_payload = baseline.json()
+        assert baseline_payload["branch"] == "backend"
+        assert baseline_payload["commit_sha"] == backend_v1
+        assert baseline_payload["build_reused"] is False
+        baseline_detail = wait_for_terminal(client, baseline_payload["id"])
+        assert baseline_detail["run"]["status"] == "completed"
+        assert baseline_detail["run"]["repository_id"] == registered.id
+        assert baseline_detail["run"]["repository_name"] == "jsb0"
+        assert baseline_detail["run"]["branch"] == "backend"
+        assert baseline_detail["run"]["commit_sha"] == backend_v1
+        assert baseline_detail["run"]["build_branch"] == "backend"
+        assert baseline_detail["run"]["autopilot"] == "baseline"
+
+        primary = client.post(
+            "/api/runs",
+            json={
+                "branch": "backend",
+                "scenario": "roll_hold_5deg.yaml",
+                "autopilot": "primary",
+            },
+        )
+        primary_payload = primary.json()
+        assert primary_payload["commit_sha"] == backend_v1
+        assert primary_payload["build_id"] == baseline_payload["build_id"]
+        assert primary_payload["build_reused"] is True
+        primary_detail = wait_for_terminal(client, primary_payload["id"])
+        assert primary_detail["run"]["autopilot"] == "primary"
+
+        legacy = client.post(
+            "/api/runs",
+            json={
+                "repository_id": registered.id,
+                "branch": "backend",
+                "scenario": "roll_hold_5deg.yaml",
+                "autopilot": "baseline",
+            },
+        )
+        assert legacy.status_code == 202
+        assert legacy.json()["build_reused"] is True
+        assert wait_for_terminal(client, legacy.json()["id"])["run"]["repository_id"] == registered.id
+
+        (source / "version.txt").write_text("backend-v2\n", encoding="utf-8")
+        git("add", ".", cwd=source)
+        git("commit", "-m", "backend v2", cwd=source)
+        backend_v2 = git("rev-parse", "HEAD", cwd=source)
+        advanced = client.post(
+            "/api/runs",
+            json={
+                "branch": "backend",
+                "scenario": "roll_hold_5deg.yaml",
+                "autopilot": "baseline",
+            },
+        )
+        advanced_payload = advanced.json()
+        assert advanced_payload["commit_sha"] == backend_v2
+        assert advanced_payload["build_id"] != baseline_payload["build_id"]
+        assert client.get(f"/api/runs/{baseline_payload['id']}").json()["run"]["commit_sha"] == backend_v1
+        assert wait_for_terminal(client, advanced_payload["id"])["run"]["status"] == "completed"

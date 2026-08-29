@@ -67,7 +67,10 @@ class RunExecutionService:
                     raise RuntimeError("build repository is not configured")
                 build = self.builds.get(run.build_id)
                 if build.status is not BuildStatus.COMPLETED or not build.executable_path:
-                    raise RuntimeError("selected build is not completed")
+                    detail = f": {build.error_message}" if build.error_message else ""
+                    raise RuntimeError(
+                        f"build #{build.id} is {build.status.value}{detail}"
+                    )
                 executable_path = Path(build.executable_path).resolve()
                 if self.build_root is None:
                     raise RuntimeError("build root is not configured")

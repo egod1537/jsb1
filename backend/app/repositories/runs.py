@@ -25,6 +25,7 @@ class RunRepository:
         *,
         commit_sha: str | None,
         repository_id: int | None = None,
+        branch: str | None = None,
         build_id: int | None = None,
         scenario_name: str,
         scenario_path: str,
@@ -33,12 +34,13 @@ class RunRepository:
         with self.database.connect() as connection:
             cursor = connection.execute(
                 """INSERT INTO runs
-                   (status, repository_id, build_id, commit_sha, scenario_name,
+                   (status, repository_id, branch, build_id, commit_sha, scenario_name,
                     scenario_path, autopilot, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     RunStatus.QUEUED.value,
                     repository_id,
+                    branch,
                     build_id,
                     commit_sha,
                     scenario_name,
@@ -96,7 +98,7 @@ class RunRepository:
         parameters.append(limit)
         with self.database.connect() as connection:
             rows = connection.execute(
-                f"""SELECT runs.id, runs.status, runs.repository_id,
+                f"""SELECT runs.id, runs.status, runs.repository_id, runs.branch,
                            repositories.name AS repository_name, runs.build_id,
                            builds.branch AS build_branch, runs.commit_sha,
                            runs.scenario_name, runs.autopilot, runs.created_at,

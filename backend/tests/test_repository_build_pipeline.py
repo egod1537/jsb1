@@ -158,6 +158,7 @@ async def test_build_transitions_cache_failure_and_lineage(
     instances = InstanceRepository(database)
     run = runs.create(
         repository_id=registered.id,
+        branch="impl",
         build_id=completed.id,
         commit_sha=completed.commit_sha,
         scenario_name="roll_hold.yaml",
@@ -167,6 +168,7 @@ async def test_build_transitions_cache_failure_and_lineage(
     instance = instances.create(build_id=completed.id, run_id=run.id)
     lineage = runs.get(run.id)
     assert lineage.repository_name == "jsb0"
+    assert lineage.branch == "impl"
     assert lineage.build_id == completed.id
     assert lineage.build_branch == "impl"
     assert lineage.commit_sha == second

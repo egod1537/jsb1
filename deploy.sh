@@ -67,6 +67,7 @@ unit_dir="$UNITS_DIR/$slug"
 project="$(project_for_slug "$slug")"
 hostname="$(hostname_for "$branch" "$slug")"
 github_environment="$(github_environment_for_slug "$slug")"
+github_commit_context="$(github_commit_status_context_for_slug "$slug")"
 previous_hostname="$(unit_value "$unit_dir" previous-hostname 2>/dev/null || unit_value "$unit_dir" hostname 2>/dev/null || true)"
 recorded_commit="$(unit_value "$unit_dir" commit 2>/dev/null || true)"
 recorded_status="$(unit_value "$unit_dir" status 2>/dev/null || true)"
@@ -80,6 +81,11 @@ deployment_cleanup() {
     if [[ "$GITHUB_DEPLOYMENT_CREATED" == true ]]; then
       github_update_deployment_status \
         "$unit_dir" failure "Deployment failed: $deployment_stage" || true
+    fi
+    if [[ "$GITHUB_COMMIT_STATUS_STARTED" == true ]]; then
+      github_update_commit_status \
+        "$unit_dir" "$commit" failure "$github_commit_context" \
+        "Deployment failed: $deployment_stage" "https://$hostname" || true
     fi
   fi
   release_lock
@@ -103,6 +109,11 @@ deployment_stage="GitHub deployment initialization"
 github_create_deployment \
   "$unit_dir" "$commit" "$github_environment" "$branch" "$hostname" \
   || die "GitHub deployment reporting is required but initialization failed"
+deployment_stage="GitHub commit status initialization"
+github_update_commit_status \
+  "$unit_dir" "$commit" pending "$github_commit_context" \
+  "Deploying $branch" "https://$hostname" \
+  || die "GitHub commit status reporting is required but initialization failed"
 
 deployment_stage="preparing worktree"
 if [[ ! -e "$worktree/.git" ]]; then
@@ -186,6 +197,11 @@ if [[ "$GITHUB_DEPLOYMENT_CREATED" == true ]]; then
     "$unit_dir" success "Deployment completed successfully" "https://$hostname" \
     || die "GitHub deployment reporting is required but success status failed"
 fi
+deployment_stage="GitHub commit success reporting"
+github_update_commit_status \
+  "$unit_dir" "$commit" success "$github_commit_context" \
+  "Deployment successful" "https://$hostname" \
+  || die "GitHub commit status reporting is required but success status failed"
 deployment_stage="recording successful deployment"
 record_successful_commit "$unit_dir" "$commit"
 atomic_value "$unit_dir" status running

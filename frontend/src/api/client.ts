@@ -1,4 +1,4 @@
-import type { Branch, Build, BuildVersion, CreateRunInput, Deployment, Repository, RunDetail, RunSummary, SignalResponse } from "../types/api";
+import type { Branch, Build, BuildVersion, CreateRunInput, CreateRunResponse, Deployment, Repository, RunDetail, RunSummary, SignalResponse } from "../types/api";
 
 export class ApiError extends Error {
   constructor(
@@ -36,10 +36,12 @@ export const api = {
   version: () => request<BuildVersion>("/api/version"),
   scenarios: () => request<string[]>("/api/scenarios"),
   autopilots: () => request<string[]>("/api/autopilots"),
+  runtimeRepository: () => request<Repository>("/api/runtime/repository"),
+  runtimeBranches: () => request<Branch[]>("/api/runtime/branches"),
   runs: (query = "") => request<RunSummary[]>(`/api/runs${query}`),
   run: (id: number) => request<RunDetail>(`/api/runs/${id}`),
   createRun: (input: CreateRunInput) =>
-    request<{ id: number; status: string }>("/api/runs", {
+    request<CreateRunResponse>("/api/runs", {
       method: "POST",
       body: JSON.stringify(input),
     }),

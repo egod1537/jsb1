@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small, dependency-free client for JSB1 GitHub Deployment reporting."""
+"""Small client for JSB1 GitHub Deployment and Commit Status reporting."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ DEFAULT_API_VERSION = "2026-03-10"
 REPOSITORY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 COMMIT_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
 VALID_STATES = ("in_progress", "success", "failure", "inactive")
+VALID_COMMIT_STATES = ("pending", "success", "failure", "error")
 
 
 class GitHubApiError(RuntimeError):
@@ -58,6 +59,26 @@ def deployment_status_payload(
     }
     if environment_url:
         payload["environment_url"] = environment_url
+    return payload
+
+
+def commit_status_payload(
+    state: str,
+    context: str,
+    description: str,
+    target_url: str | None = None,
+) -> dict[str, Any]:
+    if state not in VALID_COMMIT_STATES:
+        raise ValueError(f"unsupported commit status state: {state}")
+    if not context or len(context) > 100:
+        raise ValueError("commit status context must contain 1-100 characters")
+    payload: dict[str, Any] = {
+        "state": state,
+        "context": context,
+        "description": description[:140],
+    }
+    if target_url:
+        payload["target_url"] = target_url
     return payload
 
 
@@ -111,9 +132,12 @@ def api_request(
     return result
 
 
-def _validate_common(repository: str, environment: str) -> None:
+def _validate_repository(repository: str) -> None:
     if not REPOSITORY_PATTERN.fullmatch(repository):
         raise ValueError("repository must use owner/name format")
+
+
+def _validate_environment(environment: str) -> None:
     if not environment or len(environment) > 255:
         raise ValueError("environment must contain 1-255 characters")
 
@@ -140,6 +164,13 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--environment", required=True)
     status.add_argument("--description", required=True)
     status.add_argument("--environment-url")
+
+    commit_status = subparsers.add_parser("status-commit")
+    commit_status.add_argument("--commit", required=True)
+    commit_status.add_argument("--state", required=True, choices=VALID_COMMIT_STATES)
+    commit_status.add_argument("--context", required=True)
+    commit_status.add_argument("--description", required=True)
+    commit_status.add_argument("--target-url")
     return parser
 
 
@@ -150,8 +181,9 @@ def main(argv: list[str] | None = None) -> int:
         print("GitHub token is not configured", file=sys.stderr)
         return 2
     try:
-        _validate_common(args.repository, args.environment)
+        _validate_repository(args.repository)
         if args.command == "create":
+            _validate_environment(args.environment)
             if not COMMIT_PATTERN.fullmatch(args.commit):
                 raise ValueError("commit must be a full 40-character SHA")
             payload = create_deployment_payload(
@@ -174,6 +206,26 @@ def main(argv: list[str] | None = None) -> int:
             print(deployment_id)
             return 0
 
+        if args.command == "status-commit":
+            if not COMMIT_PATTERN.fullmatch(args.commit):
+                raise ValueError("commit must be a full 40-character SHA")
+            payload = commit_status_payload(
+                args.state,
+                args.context,
+                args.description,
+                args.target_url,
+            )
+            api_request(
+                "POST",
+                f"/repos/{args.repository}/statuses/{args.commit}",
+                payload,
+                token=token,
+                api_url=args.api_url,
+                api_version=args.api_version,
+            )
+            return 0
+
+        _validate_environment(args.environment)
         if args.deployment_id <= 0:
             raise ValueError("deployment id must be positive")
         payload = deployment_status_payload(

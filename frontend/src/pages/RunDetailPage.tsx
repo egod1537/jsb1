@@ -57,8 +57,9 @@ export function RunDetailPage() {
       <Link className="back-link" to="/runs">← All runs</Link>
       <PageHeader eyebrow={run.scenario_name} title={`Run #${run.id}`} actions={<StatusTag status={run.status} />} />
       <section className="property-grid run-summary-panel" aria-label="Run summary">
+        <div><span>Scenario</span><strong>{run.scenario_name}</strong></div>
         <div><span>Repository</span><strong>{run.repository_name ?? "Legacy runner"}</strong></div>
-        <div><span>Branch</span><strong>{run.build_branch ?? "—"}</strong></div>
+        <div><span>Branch</span><strong>{run.branch ?? run.build_branch ?? "—"}</strong></div>
         <div><span>Commit</span><code title={run.commit_sha ?? undefined}>{run.commit_sha?.slice(0, 10) ?? "—"}</code></div>
         <div><span>Build</span><strong>{run.build_id ? `#${run.build_id}` : "—"}</strong></div>
         <div><span>Autopilot</span><strong>{run.autopilot}</strong></div>
@@ -66,7 +67,7 @@ export function RunDetailPage() {
         <div><span>Wall time</span><strong>{run.wall_time_sec == null ? "—" : `${run.wall_time_sec.toFixed(2)} s`}</strong></div>
       </section>
       {run.error_message && <ErrorPanel message={run.error_message} />}
-      {(run.status === "queued" || run.status === "running") && <Loading label={run.status === "queued" ? "Waiting for a worker" : "Simulation running"} />}
+      {(run.status === "queued" || run.status === "running") && <Loading label={run.status === "queued" ? "Resolving build and waiting for a worker" : "Simulation running"} />}
       {completed && signals.loading && <Loading label="Loading telemetry" />}
       {signals.error && <ErrorPanel message={signals.error} />}
       {telemetry ? <section className="telemetry-workspace">

@@ -41,6 +41,15 @@ class JsbRepositoryRepository:
             raise KeyError(repository_id)
         return Repository.model_validate(dict(row))
 
+    def get_by_name(self, name: str) -> Repository:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM repositories WHERE name = ? COLLATE NOCASE", (name,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(name)
+        return Repository.model_validate(dict(row))
+
     def list(self) -> list[Repository]:
         with self.database.connect() as connection:
             rows = connection.execute(

@@ -33,6 +33,8 @@ GITHUB_REPOSITORY="${JSB1_GITHUB_REPOSITORY:-egod1537/jsb1}"
 GITHUB_DEPLOYMENT_REQUIRED="${JSB1_GITHUB_DEPLOYMENT_REQUIRED:-false}"
 GITHUB_DEPLOYMENT_HELPER="${JSB1_GITHUB_DEPLOYMENT_HELPER:-$REPO_ROOT/scripts/github_deployment.py}"
 GITHUB_DEPLOYMENT_CREATED=false
+GITHUB_COMMIT_STATUS_STARTED=false
+GITHUB_REPORTING_WARNING_SHOWN=false
 
 die() {
   printf 'error: %s\n' "$*" >&2
@@ -160,6 +162,11 @@ github_environment_for_slug() {
   printf 'jsb1/%s\n' "$slug"
 }
 
+github_commit_status_context_for_slug() {
+  local slug="$1"
+  printf 'jsb1/deploy/%s\n' "$slug"
+}
+
 github_auth_token() {
   if [[ -n "${JSB1_GITHUB_TOKEN:-}" ]]; then
     printf '%s\n' "$JSB1_GITHUB_TOKEN"
@@ -172,7 +179,10 @@ github_auth_token() {
 
 github_reporting_warning() {
   local message="$1"
-  printf 'warning: GitHub deployment reporting %s\n' "$message" >&2
+  if [[ "$GITHUB_REPORTING_WARNING_SHOWN" != true ]]; then
+    printf 'warning: GitHub reporting %s\n' "$message" >&2
+    GITHUB_REPORTING_WARNING_SHOWN=true
+  fi
   [[ "$GITHUB_DEPLOYMENT_REQUIRED" != true ]]
 }
 
@@ -225,6 +235,50 @@ github_update_deployment_status() {
   fi
   rm -f "$error_file"
   atomic_value "$unit_dir" github-deployment-status "$state"
+}
+
+github_update_commit_status() {
+  local unit_dir="$1"
+  local commit="$2"
+  local state="$3"
+  local context="$4"
+  local description="$5"
+  local target_url="${6:-}"
+  local token error_file message
+  local -a arguments
+  atomic_value "$unit_dir" github-commit-status-context "$context"
+  atomic_value "$unit_dir" github-commit-status-commit "$commit"
+  if ! token="$(github_auth_token)"; then
+    atomic_value "$unit_dir" github-commit-status disabled
+    github_reporting_warning "skipped: JSB1_GITHUB_TOKEN/GITHUB_TOKEN is not configured"
+    return
+  fi
+  error_file="$unit_dir/.github-commit-error.$$"
+  arguments=(
+    --repository "$GITHUB_REPOSITORY"
+    status-commit
+    --commit "$commit"
+    --state "$state"
+    --context "$context"
+    --description "$description"
+  )
+  if [[ -n "$target_url" ]]; then
+    arguments+=(--target-url "$target_url")
+  fi
+  if ! JSB1_GITHUB_TOKEN="$token" python3 "$GITHUB_DEPLOYMENT_HELPER" "${arguments[@]}" \
+    >/dev/null 2>"$error_file"; then
+    message="$(github_helper_error "$error_file")"
+    atomic_value "$unit_dir" github-commit-status error
+    github_reporting_warning "failed: $message"
+    return
+  fi
+  rm -f "$error_file"
+  atomic_value "$unit_dir" github-commit-status "$state"
+  if [[ "$state" == pending ]]; then
+    # shellcheck disable=SC2034 # Read by deploy.sh's EXIT trap.
+    GITHUB_COMMIT_STATUS_STARTED=true
+  fi
+  return 0
 }
 
 github_create_deployment() {

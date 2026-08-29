@@ -8,6 +8,7 @@ from pathlib import Path
 from app.domain.build import Build, BuildStatus
 from app.repositories.builds import BuildRepository
 from app.repositories.runs import utc_now
+from app.domain.repository import Revision
 from app.services.repository_manager import InvalidRepositoryPath, RepositoryManager
 
 
@@ -41,6 +42,12 @@ class BuildManager:
         self, repository_id: int, revision: str, *, rebuild: bool = False
     ) -> tuple[Build, bool]:
         resolved = self.repositories.revision(repository_id, revision)
+        return self.request_resolved(resolved, rebuild=rebuild)
+
+    def request_resolved(
+        self, resolved: Revision, *, rebuild: bool = False
+    ) -> tuple[Build, bool]:
+        repository_id = resolved.repository_id
         if not rebuild:
             cached = self.repository.find_completed(repository_id, resolved.commit_sha)
             if cached and cached.executable_path:

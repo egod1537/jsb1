@@ -33,8 +33,8 @@ service_state() {
   fi
 }
 
-printf '%-28s %-10s %-12s %-12s %-49s %-7s %-12s %-20s %-46s %s\n' \
-  BRANCH STATUS GITHUB STALE_FOR CONTAINERS PORT COMMIT BUILT_AT HOSTNAME WORKTREE
+printf '%-28s %-10s %-12s %-13s %-12s %-49s %-7s %-12s %-20s %-46s %s\n' \
+  BRANCH STATUS GITHUB_DEPLOY GITHUB_COMMIT STALE_FOR CONTAINERS PORT COMMIT BUILT_AT HOSTNAME WORKTREE
 found=false
 active=0
 now="$(date +%s)"
@@ -50,6 +50,14 @@ for unit_dir in "$UNITS_DIR"/*; do
       github=untracked
     else
       github=disabled
+    fi
+  fi
+  github_commit="$(unit_value "$unit_dir" github-commit-status 2>/dev/null || true)"
+  if [[ -z "$github_commit" ]]; then
+    if github_auth_token >/dev/null 2>&1; then
+      github_commit=untracked
+    else
+      github_commit=disabled
     fi
   fi
   containers='state-only (Docker unavailable)'
@@ -71,8 +79,8 @@ for unit_dir in "$UNITS_DIR"/*; do
   if [[ "$stale_since" =~ ^[0-9]+$ && "$now" -ge "$stale_since" ]]; then
     stale_for="$((now - stale_since))s"
   fi
-  printf '%-28s %-10s %-12s %-12s %-49s %-7s %-12s %-20s %-46s %s\n' \
-    "$branch" "$status" "$github" "$stale_for" "$containers" "$port" "${commit:0:12}" "$built_at" "$hostname" "$worktree"
+  printf '%-28s %-10s %-12s %-13s %-12s %-49s %-7s %-12s %-20s %-46s %s\n' \
+    "$branch" "$status" "$github" "$github_commit" "$stale_for" "$containers" "$port" "${commit:0:12}" "$built_at" "$hostname" "$worktree"
 done
 if [[ "$found" == false ]]; then
   printf '(no deployments)\n'
