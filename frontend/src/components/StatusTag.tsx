@@ -11,6 +11,7 @@ const statusPresentation: Record<string, { intent: IntentType; icon: IconName }>
   warning: { intent: Intent.WARNING, icon: IconNames.WARNING_SIGN },
   dirty: { intent: Intent.WARNING, icon: IconNames.WARNING_SIGN },
   failed: { intent: Intent.DANGER, icon: IconNames.ERROR },
+  partial_failed: { intent: Intent.WARNING, icon: IconNames.WARNING_SIGN },
   error: { intent: Intent.DANGER, icon: IconNames.ERROR },
   disconnected: { intent: Intent.DANGER, icon: IconNames.OFFLINE },
   stopped: { intent: Intent.NONE, icon: IconNames.STOP },

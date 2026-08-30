@@ -1,0 +1,100 @@
+.analysis-workspace { display: flex; width: 100%; max-width: 100%; min-width: 0; min-height: 0; flex: 1 1 520px; flex-direction: column; overflow-x: hidden; overflow-y: hidden; border: 1px solid var(--console-border); background: #1b2027; }
+.workspace-toolbar { display: flex; width: 100%; max-width: 100%; min-width: 0; min-height: 36px; flex: 0 0 auto; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 3px 7px; overflow-x: hidden; overflow-y: visible; border-bottom: 1px solid var(--console-border); background: var(--console-surface); white-space: nowrap; }
+.workspace-toolbar-group, .workspace-toolbar-actions { display: flex; min-width: 0; align-items: center; gap: 5px; }
+.workspace-toolbar-group > label, .workspace-toolbar-group > span { color: var(--console-muted); font: 600 11px var(--font-ui); letter-spacing: 0.01em; }
+.workspace-toolbar .bp6-html-select select, .workspace-toolbar .bp6-button { min-height: 26px; font-size: 11px; }
+.plot-preset-trigger { min-width: 132px; justify-content: space-between; border: 1px solid var(--console-border) !important; background: #252a31 !important; color: var(--console-text) !important; }
+.plot-preset-trigger:hover { border-color: var(--console-border-strong) !important; background: #2f343c !important; }
+.plot-preset-trigger:active, .plot-preset-select-target[aria-expanded="true"] .plot-preset-trigger { background: #383e47 !important; }
+.plot-preset-trigger .bp6-button-text { flex: 1; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.plot-preset-popover { background: transparent; }
+.plot-preset-menu { min-width: 224px; padding: 4px; border: 1px solid var(--console-border-strong); background: #252a31 !important; color: var(--console-text); box-shadow: 0 10px 24px rgba(0, 0, 0, 0.38); }
+.plot-preset-menu .bp6-menu-header { margin: 4px -4px 2px; border-top: 1px solid var(--console-border-strong); background: #20262d; }
+.plot-preset-menu .bp6-menu-header:first-child { border-top: 0; }
+.plot-preset-menu .bp6-menu-header > h6 { padding: 6px 9px 3px; color: var(--console-muted); font: 600 11px var(--font-ui); letter-spacing: 0.035em; text-transform: uppercase; }
+.plot-preset-menu .bp6-menu-item { min-height: 28px; border-radius: 2px; color: var(--console-text-muted); font-size: 11px; }
+.plot-preset-menu .bp6-menu-item .bp6-menu-item-label { color: var(--console-muted); font: 10px var(--font-technical); }
+.plot-preset-menu .bp6-menu-item:hover:not(.bp6-disabled) { background: rgba(143, 153, 168, 0.16); color: var(--console-text); }
+.plot-preset-menu .bp6-menu-item:active:not(.bp6-disabled), .plot-preset-menu .bp6-menu-item.bp6-active:not(.bp6-disabled) { background: rgba(76, 144, 240, 0.2); color: #dbe8fa; }
+.plot-preset-menu .plot-preset-menu-item-selected { background: rgba(76, 144, 240, 0.13); color: #8abbff; }
+.plot-preset-menu .plot-preset-menu-item-selected .bp6-menu-item-selected-icon { color: var(--console-accent); }
+.plot-preset-menu .bp6-menu-item.bp6-disabled { background: transparent !important; color: rgba(171, 179, 191, 0.42) !important; }
+.plot-preset-menu .bp6-menu-item.bp6-disabled .bp6-menu-item-label { color: rgba(143, 153, 168, 0.38) !important; }
+.workspace-toolbar-actions { margin-left: auto; }
+.workspace-readout { display: flex; min-width: 0; align-items: center; gap: 8px; overflow: hidden; color: var(--console-text-muted); font: 10.5px var(--font-technical); font-variant-numeric: tabular-nums; }
+.workspace-readout > span { padding-left: 8px; border-left: 1px solid var(--console-border); }
+.plot-area { width: 100%; max-width: 100%; min-width: 0; min-height: 0; flex: 1 1 auto; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; }
+.workspace-notice { display: flex; min-height: 28px; flex: 0 0 auto; align-items: center; gap: 7px; padding: 4px 9px; border-bottom: 1px solid var(--console-border); color: var(--console-text-muted); font-size: 11px; }
+.plot-area > .bp6-callout { margin: 6px; }
+.run-analysis-view { display: flex; width: 100%; max-width: 100%; min-width: 0; min-height: 0; flex: 1 1 520px; flex-direction: column; overflow-x: hidden; }
+.run-analysis-view > .shared-timeline { margin-bottom: 8px; }
+.run-analysis-view > .telemetry-workspace { min-height: 0; flex: 1 1 auto; }
+.shared-timeline { z-index: 4; width: 100%; max-width: 100%; min-width: 0; flex: 0 0 auto; overflow-x: hidden; overflow-y: hidden; border: 1px solid var(--console-border); background: rgba(27, 32, 39, 0.98); box-shadow: 0 3px 10px rgba(0, 0, 0, 0.18); }
+.shared-timeline-labels { display: flex; width: 100%; max-width: 100%; min-width: 0; min-height: 25px; align-items: center; gap: 12px; padding: 2px 9px 0; overflow: hidden; color: var(--console-text-muted); font: 10.5px var(--font-technical); font-variant-numeric: tabular-nums; }
+.shared-timeline-labels > span { min-width: 0; }
+.shared-timeline-labels > span:first-child { color: var(--console-muted); font-family: var(--font-ui); font-weight: 600; letter-spacing: 0.035em; text-transform: uppercase; }
+.shared-timeline-labels > small { min-width: 0; margin-left: auto; overflow: hidden; color: var(--console-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.shared-timeline-control { width: 100%; max-width: 100%; min-width: 0; padding: 0 0 3px; overflow: hidden; }
+.shared-timeline-axis { position: relative; height: 21px; margin: 0 18px; border-bottom: 1px solid var(--console-border-strong); color: var(--console-text-muted); font: 10px var(--font-technical); font-variant-numeric: tabular-nums; }
+.shared-timeline-tick { position: absolute; bottom: 4px; overflow: visible; color: var(--console-text-muted); line-height: 12px; transform: translateX(-50%); white-space: nowrap; }
+.shared-timeline-tick::after { position: absolute; bottom: -5px; left: 50%; width: 1px; height: 3px; background: var(--console-border-strong); content: ""; }
+.shared-timeline-tick-first { transform: none; }
+.shared-timeline-tick-first::after { left: 0; }
+.shared-timeline-tick-last { transform: translateX(-100%); }
+.shared-timeline-tick-last::after { right: 0; left: auto; }
+.shared-timeline-selector { width: 100%; max-width: 100%; min-width: 0; height: 25px; margin-top: 3px; overflow: hidden; }
+.shared-timeline-chart { width: 100%; max-width: 100%; min-width: 0; height: 25px; overflow: hidden; }
+.shared-timeline-disabled { opacity: 0.55; pointer-events: none; }
+.plot-grid { display: grid; width: 100%; max-width: 100%; min-width: 0; min-height: 0; grid-template-columns: repeat(var(--plot-columns), minmax(0, 1fr)); grid-template-rows: repeat(var(--plot-rows), var(--plot-row-height)); grid-auto-rows: var(--plot-row-height); align-content: start; gap: 1px; overflow-x: hidden; background: var(--console-border); }
+.plot-grid-cell { position: relative; width: 100%; max-width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; background: #1b2027; }
+.plot-grid-cell > .plot-panel, .plot-grid-cell > .plot-empty-slot { width: 100%; height: 100%; }
+.plot-grid-cell-drop-target { z-index: 1; box-shadow: inset 0 0 0 2px var(--console-accent); }
+.plot-grid-cell-drop-target::after { position: absolute; z-index: 3; inset: 0; border: 1px solid rgba(138, 187, 255, 0.72); background: rgba(76, 144, 240, 0.09); content: ""; pointer-events: none; }
+.plot-panel { display: flex; width: 100%; max-width: 100%; height: 100%; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; background: #1f242b; }
+.plot-panel-dragging { opacity: 0.42; }
+.plot-panel-header { display: flex; width: 100%; max-width: 100%; min-width: 0; min-height: 30px; align-items: center; justify-content: space-between; gap: 6px; padding: 0 5px 0 9px; overflow: hidden; border-bottom: 1px solid var(--console-border); background: var(--console-surface); }
+.plot-panel-title { display: flex; min-width: 0; align-items: baseline; gap: 7px; }
+.plot-panel-title > span { overflow: hidden; color: var(--console-text-muted); font: 600 11.5px var(--font-ui); letter-spacing: 0.01em; text-overflow: ellipsis; white-space: nowrap; }
+.plot-panel-title > small { color: var(--console-muted); font: 10px var(--font-technical); }
+.plot-panel-actions { display: flex; align-items: center; }
+.plot-panel-actions .bp6-button { min-width: 24px; min-height: 24px; }
+.plot-panel-actions .plot-drag-handle { cursor: grab; touch-action: none; }
+.plot-panel-actions .plot-drag-handle:active { cursor: grabbing; }
+.plot-panel .chart { width: 100%; max-width: 100%; min-width: 0; min-height: 0; flex: 1; overflow: hidden; }
+.plot-panel .chart > div, .shared-timeline-chart > div { width: 100% !important; max-width: 100%; min-width: 0; overflow: hidden; }
+.plot-panel .chart canvas, .shared-timeline-chart canvas { display: block; max-width: 100%; }
+.plot-signal-warning { padding: 4px 8px; border-bottom: 1px solid rgba(219, 55, 55, 0.45); background: rgba(219, 55, 55, 0.08); color: #ffb8b8; font-size: 11px; }
+.plot-signal-warning code { color: inherit; font-size: inherit; }
+.plot-panel-empty, .plot-empty-slot { display: flex; height: 100%; min-height: 0; align-items: center; justify-content: center; color: var(--console-muted); font-size: 11px; }
+.plot-empty-slot { background: #1b2027; }
+.plot-settings-dialog { width: min(760px, calc(100vw - 40px)); }
+.plot-maximize-dialog { display: flex; width: calc(100vw - 48px); max-width: 1600px; height: calc(100vh - 48px); flex-direction: column; }
+.plot-maximize-dialog-body { display: flex; min-height: 0; flex: 1; padding: 0; overflow: hidden; }
+.plot-maximize-dialog-body .plot-panel { width: 100%; min-height: 0; }
+.plot-maximize-dialog-body .plot-panel .chart { min-height: 0; flex: 1; }
+.plot-panel-dialog { height: 100%; }
+.workspace-maximize-dialog { display: flex; width: 95vw; max-width: none; height: 94vh; max-height: 94vh; flex-direction: column; }
+.workspace-maximize-dialog-body { display: flex; width: 100%; max-width: 100%; min-width: 0; min-height: 0; flex: 1; padding: 0; overflow: hidden; }
+.workspace-maximize-dialog-body .analysis-workspace { width: 100%; max-width: 100%; min-width: 0; min-height: 0; flex: 1 1 auto; border: 0; }
+.analysis-workspace-dialog { height: 100%; }
+.plot-settings-signals { max-height: 214px; margin-top: 6px; overflow-y: auto; border: 1px solid var(--console-border); background: #1b2027; }
+.plot-template-picker { display: grid; grid-template-columns: 120px minmax(0, 1fr); align-items: center; gap: 8px; margin-bottom: 7px; }
+.plot-template-picker > span { color: var(--console-muted); font: 600 11px var(--font-ui); letter-spacing: 0.01em; }
+.plot-template-picker .bp6-html-select { width: 100%; min-width: 0; }
+.signal-picker-category > header { position: sticky; z-index: 2; top: 0; padding: 5px 8px; border-bottom: 1px solid var(--console-border-strong); background: #252b33; color: var(--console-text-muted); font: 600 11px var(--font-ui); letter-spacing: 0.035em; text-transform: uppercase; }
+.signal-picker-category + .signal-picker-category > header { border-top: 1px solid var(--console-border-strong); }
+.signal-picker-subcategory-title { padding: 4px 8px 3px; border-bottom: 1px solid var(--console-border); background: #20262d; color: var(--console-muted); font: 600 10.5px var(--font-ui); letter-spacing: 0.01em; }
+.plot-settings-signals .plot-settings-signal-row { display: flex; min-height: 34px; margin: 0; padding: 6px 8px 6px 29px; align-items: center; border-bottom: 1px solid var(--console-border); }
+.plot-settings-signals .plot-settings-signal-row:last-child { border-bottom: 0; }
+.plot-settings-signals .bp6-control-indicator { margin-top: 1px; }
+.plot-settings-signals .bp6-control-label { width: 100%; min-width: 0; }
+.signal-picker-row-content { display: grid; width: 100%; min-width: 0; grid-template-columns: minmax(145px, 1.1fr) 56px minmax(145px, 1fr) 76px; align-items: center; gap: 10px; }
+.signal-picker-display-name { overflow: hidden; color: var(--console-text); font-size: 12px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.signal-symbol { display: inline-flex; min-width: 0; align-items: center; color: #dbe8fa; font-size: 12px; }
+.signal-symbol .katex { font-size: 1.08em; }
+.signal-symbol-empty { color: var(--console-muted); }
+.signal-picker-row-content code { overflow: hidden; color: var(--console-muted); font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
+.signal-picker-row-content small { justify-self: end; color: var(--console-text-muted); font: 10.5px var(--font-technical); white-space: nowrap; }
+.plot-settings-empty { padding: 12px; color: var(--console-muted); font-size: 11px; text-align: center; }
+.plot-settings-range { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 7px; }
+.plot-settings-range .bp6-form-group { margin-bottom: 5px; }

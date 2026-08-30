@@ -1,9 +1,10 @@
-import type { Branch, Build, BuildVersion, CreateRunInput, CreateRunResponse, Deployment, Repository, RunDetail, RunSummary, SignalResponse } from "../types/api";
+import type { AvailableSignalsResponse, Branch, Build, BuildVersion, CreateRunInput, CreateRunResponse, RollHoldAnalysis, RollHoldAnalysisVariants, RunDetail, RuntimeControllerParameters, RuntimeRepository, RuntimeVariants, RunSummary, ScenarioCatalogEntry, ScenarioCreateResponse, ScenarioInspectionCatalogEntry, ScenarioInspectionDetail, ScenarioInspectionSource, ScenarioSyncResult, ScenarioSyncStatus, ScenarioValidationResult, SignalResponse } from "../types/api";
 
 export class ApiError extends Error {
   constructor(
     message: string,
     public readonly status: number,
+    public readonly detail?: unknown,
   ) {
     super(message);
   }
@@ -16,6 +17,25 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     let message = `Request failed (${response.status})`;
+    let detail: unknown;
+    try {
+      const body = (await response.json()) as { detail?: string | { message?: string } };
+      detail = body.detail;
+      message = typeof body.detail === "string"
+        ? body.detail
+        : body.detail?.message ?? message;
+    } catch {
+      // Keep the HTTP fallback when an intermediary returned non-JSON.
+    }
+    throw new ApiError(message, response.status, detail);
+  }
+  return response.json() as Promise<T>;
+}
+
+async function requestVoid(path: string, init?: RequestInit): Promise<void> {
+  const response = await fetch(path, init);
+  if (!response.ok) {
+    let message = `Request failed (${response.status})`;
     try {
       const body = (await response.json()) as { detail?: string };
       message = body.detail ?? message;
@@ -24,52 +44,54 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
     throw new ApiError(message, response.status);
   }
-  return response.json() as Promise<T>;
-}
-
-async function requestVoid(path: string, init?: RequestInit): Promise<void> {
-  const response = await fetch(path, init);
-  if (!response.ok) throw new ApiError(`Request failed (${response.status})`, response.status);
 }
 
 export const api = {
   version: () => request<BuildVersion>("/api/version"),
-  scenarios: () => request<string[]>("/api/scenarios"),
-  autopilots: () => request<string[]>("/api/autopilots"),
-  runtimeRepository: () => request<Repository>("/api/runtime/repository"),
+  scenarios: () => request<ScenarioCatalogEntry[]>("/api/scenarios"),
+  scenarioCatalog: () => request<ScenarioInspectionCatalogEntry[]>("/api/scenario-catalog"),
+  scenarioDetail: (source: Exclude<ScenarioInspectionSource, "run_snapshot">, id: string) => {
+    const params = new URLSearchParams({ source, id });
+    return request<ScenarioInspectionDetail>(`/api/scenario-catalog/detail?${params}`);
+  },
+  validateScenario: (yaml: string) => request<ScenarioValidationResult>("/api/scenarios/validate", {
+    method: "POST",
+    body: JSON.stringify({ yaml }),
+  }),
+  createScenario: (path: string, yaml: string) => request<ScenarioCreateResponse>("/api/scenarios", {
+    method: "POST",
+    body: JSON.stringify({ path, yaml }),
+  }),
+  runScenario: (id: number) => request<ScenarioInspectionDetail>(`/api/runs/${id}/scenario`),
+  scenarioSyncStatus: () => request<ScenarioSyncStatus>("/api/scenarios/sync/status"),
+  syncScenarios: () => request<ScenarioSyncResult>("/api/scenarios/sync", { method: "POST" }),
+  runtimeRepository: () => request<RuntimeRepository>("/api/runtime/repository"),
+  fetchRuntimeRepository: () => request<RuntimeRepository>("/api/runtime/repository/fetch", { method: "POST" }),
   runtimeBranches: () => request<Branch[]>("/api/runtime/branches"),
+  runtimeVariants: (branch?: string) => request<RuntimeVariants>(`/api/runtime/variants${branch ? `?${new URLSearchParams({ branch })}` : ""}`),
+  runtimeParameters: (branch?: string) => request<RuntimeControllerParameters>(`/api/runtime/parameters${branch ? `?${new URLSearchParams({ branch })}` : ""}`),
   runs: (query = "") => request<RunSummary[]>(`/api/runs${query}`),
   run: (id: number) => request<RunDetail>(`/api/runs/${id}`),
+  rollHoldAnalysis: (id: number) => request<RollHoldAnalysisVariants | RollHoldAnalysis>(`/api/runs/${id}/analysis/roll-hold`),
   createRun: (input: CreateRunInput) =>
     request<CreateRunResponse>("/api/runs", {
       method: "POST",
       body: JSON.stringify(input),
     }),
-  repositories: () => request<Repository[]>("/api/repositories"),
-  repository: (id: number) => request<Repository>(`/api/repositories/${id}`),
-  createRepository: (input: { name: string; remote_url: string; local_path: string; default_branch?: string }) =>
-    request<Repository>("/api/repositories", { method: "POST", body: JSON.stringify(input) }),
-  deleteRepository: (id: number) => requestVoid(`/api/repositories/${id}`, { method: "DELETE" }),
-  fetchRepository: (id: number) => request<Repository>(`/api/repositories/${id}/fetch`, { method: "POST" }),
-  branches: (id: number) => request<Branch[]>(`/api/repositories/${id}/branches`),
+  deleteRun: (id: number) => requestVoid(`/api/runs/${id}`, { method: "DELETE" }),
   builds: (repositoryId?: number) => request<Build[]>(`/api/builds${repositoryId ? `?repository_id=${repositoryId}` : ""}`),
   build: (id: number) => request<Build>(`/api/builds/${id}`),
   createBuild: (input: { repository_id: number; revision: string; rebuild?: boolean }) =>
     request<Build>("/api/builds", { method: "POST", body: JSON.stringify(input) }),
   rebuild: (id: number) => request<Build>(`/api/builds/${id}/rebuild`, { method: "POST" }),
-  deployments: () => request<Deployment[]>("/api/deployments"),
-  deployment: (id: number) => request<Deployment>(`/api/deployments/${id}`),
-  createDeployment: (input: { repository_id: number; branch: string }) =>
-    request<Deployment>("/api/deployments", { method: "POST", body: JSON.stringify(input) }),
-  redeploy: (id: number) => request<Deployment>(`/api/deployments/${id}/redeploy`, { method: "POST" }),
-  restartDeployment: (id: number) => request<Deployment>(`/api/deployments/${id}/restart`, { method: "POST" }),
-  stopDeployment: (id: number, force = false) =>
-    requestVoid(`/api/deployments/${id}${force ? "?force=true" : ""}`, { method: "DELETE" }),
-  signals: (id: number, channels: string[], maxPoints = 2000) => {
+  signals: (id: number, signals: string[], maxPoints = 2000, variant?: string) => {
     const params = new URLSearchParams({
-      channels: channels.join(","),
+      signals: signals.join(","),
       max_points: String(maxPoints),
     });
+    if (variant) params.set("variant", variant);
     return request<SignalResponse>(`/api/runs/${id}/signals?${params}`);
   },
+  availableSignals: (id: number) =>
+    request<AvailableSignalsResponse>(`/api/runs/${id}/signals/available`),
 };

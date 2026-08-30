@@ -8,17 +8,15 @@ interface AsyncState<T> {
   error: string | null;
 }
 
-export function useRuns(poll = true): AsyncState<RunSummary[]> & { reload: () => void } {
+export function useRuns(poll = true): AsyncState<RunSummary[]> & { reload: () => Promise<void> } {
   const [state, setState] = useState<AsyncState<RunSummary[]>>({
     data: null,
     loading: true,
     error: null,
   });
-  const load = useCallback(() => {
-    api.runs()
+  const load = useCallback(() => api.runs()
       .then((data) => setState({ data, loading: false, error: null }))
-      .catch((error: Error) => setState({ data: null, loading: false, error: error.message }));
-  }, []);
+      .catch((error: Error) => setState({ data: null, loading: false, error: error.message })), []);
   useEffect(() => {
     load();
     if (!poll) return;

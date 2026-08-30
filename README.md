@@ -8,9 +8,11 @@ JSB1 is a single-host Simulation Regression & Analysis Server intended to run on
 Caddy (optional, :8080)
 ├── /          frontend/dist (React)
 └── /api/*     FastAPI (:8000)
-                  ├── SQLite metadata index
-                  ├── data/runs/<six-digit-id>/ artifacts
-                  └── in-process queue → jsb-sim-runner
+                  ├── SQLite metadata + durable job queue
+                  └── data/runs/<six-digit-id>/ artifacts
+
+Execution worker
+└── queued Build/Run → CMake / jsb-sim-runner
 ```
 
 The backend is layered as follows:
@@ -18,13 +20,18 @@ The backend is layered as follows:
 ```text
 backend/app/
 ├── api/           thin HTTP routes and dependencies
-├── domain/        typed Run, Metric, and Artifact models
-├── services/      scenario validation, execution, runner, artifact safety
+├── domain/        values, invariants, lifecycle states, and domain errors
+├── services/      application orchestration and use cases
 ├── repositories/  SQLite access and state transitions
+├── infrastructure/ Git, worktree, CMake, and deployment verification adapters
 ├── analysis/      MCAP adapter, downsampling, roll-hold metrics
-├── workers/       bounded in-process scheduler
-└── config/        environment-backed settings
+├── workers/       durable queue consumer and bounded execution schedulers
+├── config/        environment-backed settings
+└── container.py   explicit dependency composition root
 ```
+
+The responsibility boundaries and Scenario/Run/Build flows are documented in
+[`docs/architecture.md`](docs/architecture.md).
 
 ## Local development
 
@@ -66,29 +73,66 @@ Vite serves the UI at `http://localhost:5173` and proxies `/api` to `http://127.
 | `JSB1_DATABASE_PATH` | `<data>/jsb1.db` | SQLite file |
 | `JSB_SIM_RUNNER_PATH` | `jsb-sim-runner` | executable path or name on `PATH` |
 | `JSB_SCENARIO_DIR` | `./scenarios` | read-only YAML scenario root |
+| `JSB1_SCENARIO_SFTP_HOST` | unset | enables the optional remote scenario source |
+| `JSB1_SCENARIO_SFTP_PORT` | `22` | SFTP port |
+| `JSB1_SCENARIO_SFTP_USER` | unset | SFTP account |
+| `JSB1_SCENARIO_SFTP_ROOT` | `/` | recursively scanned remote root |
+| `JSB1_SCENARIO_SFTP_KEY_PATH` | unset | preferred private key; mounted read-only in Docker |
+| `JSB1_SCENARIO_SFTP_KNOWN_HOSTS_PATH` | OpenSSH default | explicit trusted host-key file |
+| `JSB1_SCENARIO_SFTP_PASSWORD` | unset | password fallback; key/agent authentication is preferred |
 | `JSB1_MAX_CONCURRENT_RUNS` | `1` | subprocess concurrency bound |
+| `JSB1_EXECUTION_MODE` | `embedded` | `embedded` for host development; Compose sets `external` |
+| `JSB1_WORKER_POLL_INTERVAL_SEC` | `0.5` | external worker durable-queue polling interval |
 | `JSB1_RUN_TIMEOUT_SEC` | `1800` | per-run timeout |
-| `JSB1_REPOSITORY_ROOT` | `<data>/repositories` | canonical JSB0 clone root |
-| `JSB1_RUNTIME_REPOSITORY_NAME` | `jsb0` | single registered repository used as the JSB0 Runtime |
+| `JSB1_REPOSITORY_ROOT` | `<data>/repositories` | managed repository root |
+| `JSB0_REPOSITORY_URL` | `https://github.com/egod1537/jsb0.git` | canonical JSB0 Runtime remote |
+| `JSB0_REPOSITORY_PATH` | `<repository-root>/jsb0` | optional canonical clone path; configured relative values resolve from the project root |
+| `JSB0_DEFAULT_BRANCH` | `impl` | preferred initial branch in the New Run form |
 | `JSB1_WORKTREE_ROOT` | `<data>/worktrees` | detached commit worktrees |
 | `JSB1_DEPLOYMENT_ROOT` | `<data>/deployments` | generated per-revision Compose overrides |
 | `JSB1_BUILD_ROOT` | `<data>/builds` | immutable build outputs and logs |
-| `JSB1_MAX_CONCURRENT_BUILDS` | `1` | in-process build concurrency |
+| `JSB1_MAX_CONCURRENT_BUILDS` | `1` | execution-worker build concurrency |
 | `JSB1_BUILD_JOBS` | `2` | jobs passed to `cmake --build -j` |
 | `JSB1_BUILD_TIMEOUT_SEC` | `3600` | timeout for each CMake command |
 | `JSB1_BUILD_EXECUTABLE_RELATIVE_PATH` | `jsb-sim-runner` | fixed executable path beneath each build directory |
-| `JSB1_AUTOPILOTS` | `["baseline","primary"]` | runner strategy whitelist; both standard strategies are always available |
 | `JSB1_CORS_ORIGINS` | localhost Vite origins | JSON list of allowed development origins |
+
+JSB1 manages exactly one canonical JSB0 Runtime repository. Repository registration
+through the web UI is intentionally unsupported. Operators can override the defaults
+in the process environment or, for a host-native backend, in
+`~/.config/jsb1/jsb1.env`:
+
+```sh
+JSB0_REPOSITORY_URL=https://github.com/egod1537/jsb0.git
+JSB0_REPOSITORY_PATH=/Users/yang/proj/jsb0
+JSB0_DEFAULT_BRANCH=impl
+```
+
+On startup JSB1 normalizes the configured remote, reuses a matching historical
+repository row when possible, creates or updates the single `jsb0` row, and clones
+an absent/empty checkout. It never deletes legacy repository rows or their build/run
+foreign keys.
 
 ## Docker
 
-Docker Compose builds the React frontend, serves it through Caddy, and proxies API requests to FastAPI. SQLite and run artifacts remain in the host `data/` directory, while scenario YAML files are read from `scenarios/`.
+Docker Compose builds the React frontend, serves it through Caddy, and proxies API requests to FastAPI. SQLite and run artifacts remain in the host `data/` directory, while scenario YAML files are read from `scenarios/`. `JSB0_REPOSITORY_PATH` is a host path in Compose configuration and is bind-mounted at the fixed container path `/runtime/jsb0`; the backend never interprets a host-only path inside the container.
 
 ```sh
 docker compose up --build -d
 ```
 
 Open `http://localhost:8081`. Stop the services with `docker compose down`. To use a different host port, set `JSB1_HTTP_PORT` before starting Compose.
+
+Compose runs API and execution as separate services. The API records queued work
+in SQLite; `worker` owns CMake and simulation subprocesses. Restarting only
+`backend` or `web` does not interrupt active worker jobs.
+
+Docker Compose does not automatically read `~/.config/jsb1/jsb1.env`; export or
+source those values before `docker compose up`, or place non-secret development
+values in the ignored project `.env`. `deploy.sh` and its automatic watcher read only
+the supported `JSB0_*` and scenario SFTP values from that host file (without overriding exported values),
+apply the same host-path-to-`/runtime/jsb0` bind mount, and create the default empty
+clone directory before Compose validation.
 
 The simulation runner is not included in this repository. The dashboard and API can run without it, and `/api/health` reports `runner_available: false`. To execute simulations, place an executable at `bin/jsb-sim-runner` and start with the runner override:
 
@@ -99,10 +143,131 @@ docker compose -f compose.yaml -f compose.runner.yaml up --build -d
 The runner command is an argv list, never a shell string:
 
 ```text
-jsb-sim-runner --scenario <validated-path> --output <run-directory> --autopilot <validated-id>
+jsb-sim-runner --scenario <validated-path> --output <run-directory>
 ```
 
-If the current runner does not accept `--autopilot`, adapt only `ExternalSimulationRunner` in `backend/app/services/runner.py`; the API, queue, and tests stay unchanged.
+One invocation records baseline and primary into the same `telemetry.mcap`.
+The compare-only mode and its variants come from
+`contract/execution/capabilities.json` in the resolved immutable JSB0 revision,
+not a JSB1 hardcoded list.
+
+## Bundled scenarios and contract validation
+
+The repository `scenarios/` directory contains sample and smoke fixtures, not the
+production scenario library:
+
+- `scenarios/samples/` contains canonical examples for people and UI development.
+- `scenarios/smoke/` contains the smallest useful contract fixtures for CI.
+
+Operational scenarios come from the validated SFTP source or the local managed
+source; the repository directory is intentionally not that catalog. JSB0 `main` is the sole
+contract source of truth. The `Scenario Contract` GitHub Actions workflow checks out
+`egod1537/jsb0` at `main` every day and on every push, pull request, or manual run,
+then validates every bundled `.yaml` and `.yml` file against
+`contract/scenario/scenario.schema.json` without copying the schema into JSB1.
+
+Run the same schema-only validation locally with adjacent JSB1 and JSB0 checkouts:
+
+```sh
+cd backend
+python -m pip install -e '.[test]'
+cd ..
+python scripts/validate-scenarios.py \
+  --scenario-dir scenarios \
+  --runtime-root ../jsb0
+```
+
+This check does not build JSB0, start JSBSim, generate MCAP, or access a remote
+scenario source.
+
+### SFTP remote scenario library
+
+SFTP is optional and manual-sync-only in this iteration. Put operator-owned values
+in `~/.config/jsb1/jsb1.env`; never commit a private key or password:
+
+```sh
+JSB1_SCENARIO_SFTP_HOST=192.168.0.10
+JSB1_SCENARIO_SFTP_PORT=22
+JSB1_SCENARIO_SFTP_USER=yang
+JSB1_SCENARIO_SFTP_ROOT=/srv/jsb-scenarios
+JSB1_SCENARIO_SFTP_KEY_PATH=/Users/yang/.ssh/id_ed25519
+JSB1_SCENARIO_SFTP_KNOWN_HOSTS_PATH=/Users/yang/.ssh/known_hosts
+```
+
+Keep the private key outside the repository with owner-only permissions
+(`chmod 600`). Deployment refuses an in-repository or group/world-accessible key.
+
+Authentication tries the configured private key, then the SSH agent/default key,
+then the optional password. Paramiko verifies the server against OpenSSH
+`known_hosts` and rejects unknown or mismatched host keys; auto-accept is never
+enabled. `deploy.sh` maps configured key/known-host files to fixed read-only
+container paths without baking either into an image.
+
+Trigger and inspect sync with:
+
+```sh
+curl -X POST https://impl-jsb.mangagaki.net/api/scenarios/sync
+curl https://impl-jsb.mangagaki.net/api/scenarios/sync/status
+curl https://impl-jsb.mangagaki.net/api/scenarios/invalid
+```
+
+The sync recursively reads only `.yaml`/`.yml`, validates all content against the
+freshly fetched canonical JSB0 `main` schema, computes SHA-256, then atomically
+replaces `data/scenarios/remote/<relative-id>`. SQLite stores catalog metadata only,
+never YAML blobs. An invalid update leaves the previous valid cache in service; a
+connection outage leaves the backend and all cached scenarios available. A remote
+deletion removes the item from the active catalog without deleting historical run
+snapshots.
+
+Arbitrary YAML can use the same validation core:
+
+```sh
+curl -X POST http://127.0.0.1:8000/api/scenarios/validate \
+  -H 'Content-Type: application/json' \
+  --data-binary '{"yaml":"schema_version: 1\nscenario_type: roll_hold\nname: Example\naircraft: c172x\n..."}'
+```
+
+Compatibility validation (HTTP, bundled CI, SFTP sync) uses JSB0 `main`. Run
+creation always validates the selected cached content again against the exact
+immutable JSB0 commit chosen for that run. Scenario YAML describes experiment
+conditions only; execution variants such as `baseline` and `primary` are selected
+separately from the runtime execution contract.
+
+### Scenario Library and immutable inspection
+
+Open `/scenarios` in the web console to browse bundled, managed, and SFTP catalog entries.
+`New Scenario` opens the roll-hold builder, whose draft must validate against the
+latest JSB0 `main` contract before it can be saved. The backend repeats validation
+and publishes the YAML without overwriting existing files. Managed scenarios live
+outside the repository at `data/scenarios/managed` by default; set
+`JSB1_MANAGED_SCENARIO_DIR` in `~/.config/jsb1/jsb1.env` to use another protected
+host-local directory.
+
+The builder's `Roll Hold Test` preset keeps experiment conditions in Scenario YAML
+and controller tuning in a separate parameter set. `Save Scenario` persists only
+the conditions. `Save & Run` forwards the parameter set to New Run, where it can be
+changed again without cloning the Scenario. JSB0 main currently exposes the PX4
+fixed-wing metadata in code rather than a machine-readable parameter contract, so
+JSB1's single compatibility adapter mirrors `FW_R_TC`, `FW_R_RMAX`, `FW_RR_P`,
+`FW_RR_I`, `FW_RR_D`, `FW_RR_FF`, and `FW_RR_IMAX` until
+`contract/execution/parameters.json` is available.
+
+The table loads lightweight metadata first; selecting an entry fetches its full
+definition and original YAML on demand. The shared read-only inspector exposes
+Overview, semantic Definition, Raw YAML, and structured Validation tabs. Invalid
+remote revisions are inspectable but remain excluded from the New Run selector.
+
+The inspection endpoints are:
+
+- `POST /api/scenarios` — validate and create a non-overwriting managed scenario
+- `GET /api/scenario-catalog` — bundled, managed, and active SFTP catalog, including invalid entries
+- `GET /api/scenario-catalog/detail?source=bundled&id=samples/example.yaml`
+- `GET /api/runs/{id}/scenario` — frozen execution snapshot with checksum integrity
+- `GET /api/comparisons/{id}/scenario` — the comparison's shared frozen snapshot
+
+Run and Comparison pages never substitute the current library file for historical
+content. They read the exact `scenario.yaml` snapshot captured at creation, compare
+its bytes with the stored SHA-256, and report a visible integrity warning on mismatch.
 
 ## MCAP telemetry contract
 
@@ -146,11 +311,13 @@ The database stores paths relative to `JSB1_DATA_DIR`. Artifact responses expose
 
 ## API
 
-- `GET|POST /api/repositories`
-- `GET|DELETE /api/repositories/{id}`
-- `POST /api/repositories/{id}/fetch`
-- `GET /api/repositories/{id}/branches`
-- `GET /api/repositories/{id}/revisions/{revision}`
+- `GET /api/repositories` (legacy repository metadata)
+- `POST /api/repositories` (deprecated compatibility endpoint)
+- `GET /api/repositories/{id}` (legacy repository metadata)
+- `DELETE /api/repositories/{id}` (deprecated compatibility endpoint)
+- `POST /api/repositories/{id}/fetch` (legacy compatibility endpoint)
+- `GET /api/repositories/{id}/branches` (legacy compatibility endpoint)
+- `GET /api/repositories/{id}/revisions/{revision}` (legacy compatibility endpoint)
 - `GET|POST /api/builds`
 - `GET /api/builds/{id}`
 - `POST /api/builds/{id}/rebuild`
@@ -163,27 +330,37 @@ The database stores paths relative to `JSB1_DATA_DIR`. Artifact responses expose
 - `GET /api/health`
 - `GET /api/version`
 - `GET /api/scenarios`
-- `GET /api/autopilots`
+- `GET /api/scenarios/invalid`
+- `POST /api/scenarios/validate`
+- `POST /api/scenarios/validate/batch`
+- `POST /api/scenarios/sync`
+- `GET /api/scenarios/sync/status`
 - `GET /api/runtime/repository`
+- `POST /api/runtime/repository/fetch`
 - `GET /api/runtime/branches`
 - `POST /api/runs`
 - `GET /api/runs?status=&scenario=&limit=`
 - `GET /api/runs/{id}`
 - `GET /api/runs/{id}/metrics`
-- `GET /api/runs/{id}/signals?channels=&start=&end=&max_points=`
+- `GET /api/runs/{id}/signals?variant=&signals=&start=&end=&max_points=`
+- `GET /api/runs/{id}/signals/available`
+- `GET /api/runs/{id}/analysis/roll-hold`
 - `GET /api/runs/{id}/artifacts`
 - `GET /api/runs/{id}/artifacts/{kind}`
 
 ## Repository and build lineage
 
-JSB1 keeps each registered repository as a canonical clone beneath the configured
-repository root. A build request resolves the supplied branch or revision to a full
-commit SHA, creates or reuses a detached worktree at
+JSB1 treats repository identity as platform configuration, not a user-created or
+run-level resource. It manages one logical repository key, `jsb0`, backed by the
+configured URL and path. A build request resolves the supplied branch or revision to
+a full commit SHA, creates or reuses a detached worktree at
 `worktrees/<repository-id>/<commit-sha>`, and runs these fixed commands:
 
 ```sh
-cmake -S <worktree> -B <build-directory>
-cmake --build <build-directory> -j <configured-jobs>
+cmake -S <worktree> -B <build-directory> \
+  -DJSB_BUILD_EDITOR=OFF -DBUILD_DOCS=OFF
+cmake --build <build-directory> -j <configured-jobs> \
+  --target jsb-sim-runner
 ```
 
 The HTTP API never accepts a build command or executable path. Set
@@ -197,25 +374,49 @@ repository, build, or commit:
 
 ```json
 {
-  "branch": "backend",
-  "scenario": "roll_hold_5deg.yaml",
-  "autopilot": "baseline"
+  "branch": "impl",
+  "scenario": "samples/c172_roll_hold_5deg_baseline.yaml",
+  "scenario_source": "bundled"
 }
 ```
 
-At queue time the backend finds the registered repository named by
-`JSB1_RUNTIME_REPOSITORY_NAME`, fetches it, and resolves the branch again (preferring
-`origin/<branch>`). It stores the runtime repository, requested branch, and immutable
-full commit SHA, then looks up a completed build by repository and commit. A cache
-hit is reused. On a miss, the build is queued
+At queue time the backend obtains the configured JSB0 Runtime repository internally,
+fetches it, and resolves the branch again (preferring `origin/<branch>`). It stores
+the repository foreign key, requested branch, and immutable full commit SHA, then
+looks up a completed build by repository and commit. A cache hit is reused. On a miss, the build is queued
 and the run remains queued until that build finishes, then executes automatically.
-`baseline` and `primary` are passed unchanged to the validated runner's
-`--autopilot` argument so the same repository/commit/scenario can compare control
-strategies.
+
+New Run inputs are Scenario, JSB0 Branch, and optional tuning parameters. The Branch
+is resolved once and the resulting immutable commit derives one reusable build:
+
+```text
+Branch ----------------> commit
+Commit ----------------> build
+Scenario+Build --------> run
+Run -------------------> baseline + primary results
+```
+
+Scenario YAML is validated against
+`contract/scenario/scenario.schema.json` from that exact JSB0 commit before a run is
+queued. The resolved compare capability and variant list remain in the Run row as
+immutable execution provenance. JSB1 ingests JSB0's `run.json` without overwriting it
+and writes its own lineage to `jsb1-run.json`. At queue time JSB1 also atomically snapshots the
+exact validated YAML to `data/runs/<id>/scenario.yaml` and stores its scenario ID,
+source, and SHA-256, so later remote edits cannot change a historical run.
+For parameterized Roll Hold execution, JSB1 stores the full effective controller
+parameter set and explicit overrides in SQLite and `jsb1-run.json`. Variant-specific
+parameter provenance is retained when the Runtime contract declares it. A non-default set is
+also atomically written to `data/runs/<id>/parameters.yaml` and supplied to the
+runner as one structured `--parameters <path>` argument; individual gains never
+become runner flags or Scenario fields.
+Run Detail provides Primary, Baseline, and Overlay views for intra-Run comparison.
+Selecting two Run records from the Runs page remains the separate inter-Run
+comparison workflow. Deprecated single-variant fields and unnamespaced MCAP artifacts
+remain readable for historical Runs but are not used by the New Run UI.
 
 The legacy optional `repository_id`, `build_id`, and `commit_sha` request fields
 remain accepted for existing clients and historical data. New UI flows do not expose
-them. Run records and `run.json` retain repository, requested branch, build, and
+them. Run records and `jsb1-run.json` retain repository, requested branch, build, and
 commit lineage even if the canonical repository later changes branches or advances
 HEAD.
 
@@ -376,20 +577,37 @@ the deployment:
 - **Commit statuses: Read and write**
 - **Metadata: Read-only** (required automatically by GitHub)
 
+Store persistent host deployment credentials outside the repository in the protected
+deployment environment file:
+
 ```sh
+mkdir -p ~/.config/jsb1
+cat > ~/.config/jsb1/deploy.env <<'EOF'
 export JSB1_GITHUB_TOKEN='...'
+EOF
+chmod 600 ~/.config/jsb1/deploy.env
+
 ./deploy.sh impl
 ```
+
+The default path is `~/.config/jsb1/deploy.env`; override it with
+`JSB1_DEPLOY_ENV_FILE=/absolute/path/to/deploy.env`. The file is optional, is read
+for every manual or automatic deployment process, and may also contain other
+host-only deployment settings such as `JSB1_GITHUB_REPOSITORY` and
+`JSB1_GITHUB_DEPLOYMENT_REQUIRED`. An already-set process environment value wins
+over the value in `deploy.env`, so one-off shell overrides remain possible. The
+loader warns if the file is not owned by the current user or has group/world
+permissions.
 
 A classic personal access token needs the broader `repo` scope to cover both APIs;
 a fine-grained token is preferred.
 
 `GITHUB_TOKEN` is accepted as a fallback. The token is never passed to Compose,
 Docker builds, the frontend, or `/api/version`, and is never saved in deployment
-unit state. Do not add it to `.env`, `.env.example`, a worktree, or a cron command.
-An installed automatic watcher must receive the token from its own secure host
-process environment; `auto-deploy.sh --install` intentionally does not copy secrets
-into the generated crontab.
+unit state. Do not add it to the repository `.env`, `.env.example`, a worktree, or
+a cron command. The generated crontab stores only the deployment environment file
+path. `auto-deploy.sh --once` loads the protected file at process startup, so token
+rotation takes effect on the next scan without reinstalling the crontab.
 
 After `deploy.sh` resolves the immutable SHA, it reports through both APIs:
 
@@ -398,11 +616,21 @@ After `deploy.sh` resolves the immutable SHA, it reports through both APIs:
 - **Commit Status API** records `pending`, `success`, or `failure` on that exact SHA
   with context `jsb1/deploy/<branch-slug>` and links to the deployed site.
 
+Commit Status `pending` is attempted first, immediately after the branch or explicit
+revision resolves to a full SHA and before GitHub Deployment creation or container
+build. Manual deploy, cron/`--once`, rollback, and a recreated branch all enter this
+same `deploy.sh` lifecycle. A recreated branch pointing to a new SHA therefore gets
+a new status lifecycle; existing statuses on its old SHA remain historical records.
+
 Only successful `/api/version`, Caddy, Cloudflare routing, and public HTTPS
 verification cause Deployment and Commit Status `success`. A later commit creates
 new records for its SHA; an explicit rollback reports against the selected old SHA.
 Successful undeploy reports only the latest Deployment as `inactive`; it does not
 rewrite the commit's deploy-attempt result. Deployment objects are never deleted.
+After posting Commit Status `success`, the deployer reads GitHub's combined status
+for the same full SHA and verifies that the expected context exists in `success`.
+Missing or mismatched status is recorded locally as `error` and logged as a warning;
+it does not change the successfully deployed service.
 For example:
 
 ```text
@@ -417,7 +645,8 @@ only when desired:
 export JSB1_GITHUB_DEPLOYMENT_REQUIRED=true
 ```
 
-The status table reads both locally recorded GitHub states without making API calls:
+The status table reads both locally recorded GitHub states without making API calls.
+It also shows the reported SHA, context, and post-success verification state:
 
 ```sh
 ./deploy.sh --status
@@ -434,6 +663,16 @@ On the deployment Mac, install the headless-safe per-user crontab watcher once:
 
 ```sh
 ./auto-deploy.sh --install
+```
+
+When `~/.config/jsb1/deploy.env` is configured as above, this same command enables
+GitHub Deployment and Commit Status reporting for cron-triggered deployments. Check
+credential readiness without exposing its value:
+
+```sh
+./auto-deploy.sh --status
+# Deployment environment: configured
+# GitHub reporting credential: configured
 ```
 
 It checks `origin` every minute. A newly created preview branch, or a new commit
@@ -533,12 +772,19 @@ marker exists, use the explicit `--revision` command above. Running `./deploy.sh
 impl` later moves it back to the current remote branch head.
 
 Build and recreate are separate steps. A build failure therefore leaves existing
-containers running. Once `docker compose up --force-recreate` begins, however, an
-application health failure can leave the new unhealthy containers in place; the
-existing Caddy/DNS route is not changed, but this CLI architecture is not blue-green
-and does not automatically roll containers back. Use `rollback.sh` or explicit
-`--revision` to restore a recorded good version. A future blue-green handoff remains
-an intentional TODO rather than a hidden architecture change.
+containers running. Normal deployment force-recreates `backend` and `web` but
+preserves the branch's independent `worker`, so active JSB0 builds and Runs continue.
+The first deployment creates the worker. To intentionally roll worker code after
+all active work has drained, run:
+
+```sh
+JSB1_DEPLOY_RESTART_WORKER=true ./deploy.sh impl
+```
+
+An application health failure can still leave new unhealthy API/web containers in
+place; the existing Caddy/DNS route is not changed, but this CLI architecture is
+not blue-green and does not automatically roll those containers back. Use
+`rollback.sh` or explicit `--revision` to restore a recorded good version.
 
 ### Operations and recovery helpers
 
@@ -627,9 +873,11 @@ Relevant configuration:
 | `JSB1_CADDY_CONFIG_PATH` | `<data>/caddy/Caddyfile` | generated root Caddyfile |
 | `JSB1_CADDY_FRAGMENTS_DIR` | `<data>/caddy/deployments` | generated Host routes |
 
-Register the JSB1 source checkout as a repository, then deploy by repository ID and
-branch. The response is queued and the UI polls until it becomes `running` or
-`failed`:
+The older controller deployment API still accepts a legacy repository ID so existing
+deployment records and clients remain valid. This compatibility path is separate
+from the canonical JSB0 Runtime and is not a repository-registration workflow in the
+Repositories page. New host deployments should use `./deploy.sh <branch>`. The
+legacy API response is queued and the UI polls until it becomes `running` or `failed`:
 
 ```sh
 curl -X POST http://127.0.0.1:8081/api/deployments \
@@ -651,6 +899,9 @@ reuse the same immutable commit.
 
 ## Security and extension seams
 
-Scenario names are resolved beneath the configured scenario root and reject traversal. Autopilot and commit fields are restricted, executable paths and arbitrary runner options are not accepted from HTTP, subprocesses use argv with `shell=False`, artifact paths are resolved beneath the data root, and error paths fail the run without crashing the server.
+Scenario names are resolved beneath the configured scenario root and reject traversal. Execution variants are validated against the selected JSB0 revision; commit fields remain restricted, executable paths and arbitrary runner options are not accepted from HTTP, subprocesses use argv with `shell=False`, artifact paths are resolved beneath the data root, and error paths fail the run without crashing the server.
 
-The replaceable boundaries are `SimulationRunner`, `InProcessRunScheduler`, `McapRunReader`, repositories, and pure metric functions. Future regression suites can add suite/scenario-matrix tables and submit multiple existing run jobs through the scheduler. Baselines, scheduled suites, build/checkout, external workers, trend analysis, and notifications can be added at those boundaries without changing v0's Run API.
+The replaceable boundaries are `SimulationRunner`, the durable job dispatcher,
+the external execution worker, `McapRunReader`, repositories, and pure metric
+functions. Future regression suites can add suite/scenario-matrix tables and submit
+multiple existing run jobs without changing the Run API.

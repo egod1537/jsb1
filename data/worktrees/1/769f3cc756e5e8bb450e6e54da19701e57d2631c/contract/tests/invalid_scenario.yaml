@@ -1,0 +1,40 @@
+schema_version: 1
+scenario_type: roll_hold
+name: Unsupported Extra Field
+aircraft: c172x
+unexpected: true
+
+initial_condition:
+  latitude_deg: 0
+  longitude_deg: 0
+  altitude_ft: 3000
+  airspeed_kts: 100
+  roll_deg: 0
+  pitch_deg: 0
+  heading_deg: 0
+  p_rad_s: 0
+  q_rad_s: 0
+  r_rad_s: 0
+
+environment:
+  wind_enabled: false
+
+trim:
+  enabled: false
+  mode: Full
+
+simulation:
+  duration_sec: 1
+  dt_sec: 0.01
+
+events:
+  - time_sec: 0
+    command:
+      type: roll_hold
+      roll_deg: 5
+
+acceptance:
+  settling_band_deg: 1
+  settling_time_limit_sec: 1
+  overshoot_limit_deg: 1
+  max_oscillation_cycles: 1

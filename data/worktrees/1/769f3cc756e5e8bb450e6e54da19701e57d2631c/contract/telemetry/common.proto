@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package jsb.telemetry.v1;
+
+// Identifies the simulation instance that produced a telemetry message.
+enum SimulationSource {
+  SIMULATION_SOURCE_UNSPECIFIED = 0;
+  SIMULATION_SOURCE_PRIMARY = 1;
+  SIMULATION_SOURCE_BASELINE = 2;
+}
+
+// Simulation-relative time. It is unrelated to Unix or wall-clock time.
+message Timestamp {
+  uint64 sim_time_ns = 1;
+}

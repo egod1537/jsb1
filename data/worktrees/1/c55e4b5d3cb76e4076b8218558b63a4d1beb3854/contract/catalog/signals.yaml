@@ -1,0 +1,90 @@
+contract_version: 2.0.0
+telemetry_schema_version: 1
+
+topics:
+  /jsb/primary/aircraft/state:
+    message: jsb.telemetry.v1.AircraftState
+    source: primary
+  /jsb/primary/control/roll:
+    message: jsb.telemetry.v1.RollControlState
+    source: primary
+  /jsb/baseline/aircraft/state:
+    message: jsb.telemetry.v1.AircraftState
+    source: baseline
+  /jsb/baseline/control/roll:
+    message: jsb.telemetry.v1.RollControlState
+    source: baseline
+  /jsb/simulation/event:
+    message: jsb.telemetry.v1.SimulationEvent
+    source: runtime
+
+signals:
+  simulation.time:
+    topic: /jsb/primary/aircraft/state
+    field: sim_time_ns
+    type: uint64
+    unit: ns
+    frame: simulation
+    convention: monotonic simulation-relative time; not Unix time
+    required: true
+    range: [0, null]
+  aircraft.roll:
+    topic: /jsb/primary/aircraft/state
+    field: roll_rad
+    type: float64
+    unit: rad
+    frame: body
+    convention: 3-2-1 Euler roll; right-hand positive about body +X
+    required: true
+  aircraft.roll_rate:
+    topic: /jsb/primary/aircraft/state
+    field: roll_rate_rad_s
+    type: float64
+    unit: rad/s
+    frame: body
+    axis: x
+    convention: body-axis p; right-hand positive about body +X
+    required: true
+  control.commanded_roll:
+    topic: /jsb/primary/control/roll
+    field: commanded_roll_rad
+    type: float64
+    unit: rad
+    frame: body
+    convention: desired 3-2-1 Euler roll; right-hand positive about body +X
+    required: true
+  control.commanded_roll_rate:
+    topic: /jsb/primary/control/roll
+    field: commanded_roll_rate_rad_s
+    type: float64
+    unit: rad/s
+    frame: body
+    axis: x
+    convention: desired body-axis p; right-hand positive about body +X
+    required: true
+  control.roll_error:
+    topic: /jsb/primary/control/roll
+    field: roll_error_rad
+    type: float64
+    unit: rad
+    frame: body
+    convention: commanded_roll_rad minus measured roll_rad
+    required: true
+  control.roll_rate_error:
+    topic: /jsb/primary/control/roll
+    field: roll_rate_error_rad_s
+    type: float64
+    unit: rad/s
+    frame: body
+    axis: x
+    convention: commanded_roll_rate_rad_s minus measured body p
+    required: true
+  actuator.aileron:
+    topic: /jsb/primary/control/roll
+    field: aileron_command
+    type: float64
+    unit: normalized
+    frame: aircraft
+    convention: positive command produces positive roll for the C172x direct input
+    required: true
+    range: [-1, 1]

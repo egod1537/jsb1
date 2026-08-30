@@ -70,6 +70,9 @@ def install_fake_cmake(directory: Path) -> Path:
     binary.write_text(
         """#!/bin/sh
 set -eu
+if [ -n "${FAKE_CMAKE_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$FAKE_CMAKE_LOG"
+fi
 if [ "${FAKE_CMAKE_FAIL:-0}" = "1" ]; then
   echo "configured failure" >&2
   exit 9
@@ -131,15 +134,29 @@ async def test_build_transitions_cache_failure_and_lineage(
     tools.mkdir()
     install_fake_cmake(tools)
     monkeypatch.setenv("PATH", f"{tools}{os.pathsep}{os.environ['PATH']}")
+    command_log = tmp_path / "cmake-commands.log"
+    monkeypatch.setenv("FAKE_CMAKE_LOG", str(command_log))
 
     build, reused = build_manager.request(registered.id, "impl")
     assert reused is False
     assert build.status is BuildStatus.QUEUED
+
+    active, reused = build_manager.request(registered.id, second)
+    assert reused is True
+    assert active.id == build.id
+    assert active.status is BuildStatus.QUEUED
+
     await build_manager.execute(build.id)
     completed = builds.get(build.id)
     assert completed.status is BuildStatus.COMPLETED
     assert completed.commit_sha == second
+    assert completed.current_stage == "complete"
+    assert [stage.status.value for stage in completed.stages] == ["success"] * 6
     assert Path(completed.executable_path or "").is_file()
+    commands = command_log.read_text(encoding="utf-8")
+    assert "-DJSB_BUILD_EDITOR=OFF" in commands
+    assert "-DBUILD_DOCS=OFF" in commands
+    assert "--target jsb-sim-runner" in commands
 
     cached, reused = build_manager.request(registered.id, second)
     assert reused is True
@@ -152,6 +169,9 @@ async def test_build_transitions_cache_failure_and_lineage(
     failed = builds.get(failed.id)
     assert failed.status is BuildStatus.FAILED
     assert "code 9" in (failed.error_message or "")
+    failed_stages = {stage.id: stage for stage in failed.stages}
+    assert failed_stages["configure"].status.value == "failed"
+    assert failed_stages["compile"].status.value == "skipped"
 
     database = builds.database
     runs = RunRepository(database)

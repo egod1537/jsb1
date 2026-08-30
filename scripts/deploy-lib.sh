@@ -4,6 +4,143 @@ set -Eeuo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "$LIB_DIR/.." && pwd -P)"
+
+DEPLOY_ENV_FILE=""
+DEPLOY_ENV_STATUS="missing"
+DEPLOY_ENV_PERMISSION_WARNING=false
+
+deploy_environment_file_mode() {
+  local env_file="$1"
+  if stat -f '%Lp' "$env_file" 2>/dev/null; then
+    return
+  fi
+  stat -c '%a' "$env_file" 2>/dev/null
+}
+
+deploy_environment_file_owner() {
+  local env_file="$1"
+  if stat -f '%u' "$env_file" 2>/dev/null; then
+    return
+  fi
+  stat -c '%u' "$env_file" 2>/dev/null
+}
+
+load_deploy_environment() {
+  local env_file="${JSB1_DEPLOY_ENV_FILE:-}"
+  local mode="" owner="" line="" variable_name="" source_status=0
+  local allexport_was_enabled=false already_preserved=false index
+  local -a preserved_names=() preserved_values=()
+
+  DEPLOY_ENV_STATUS=missing
+  DEPLOY_ENV_PERMISSION_WARNING=false
+  if [[ -z "$env_file" ]]; then
+    if [[ -z "${HOME:-}" ]]; then
+      DEPLOY_ENV_FILE=""
+      return 0
+    fi
+    env_file="$HOME/.config/jsb1/deploy.env"
+  fi
+  DEPLOY_ENV_FILE="$env_file"
+  [[ -e "$env_file" ]] || return 0
+  if [[ ! -f "$env_file" || ! -r "$env_file" ]]; then
+    DEPLOY_ENV_STATUS=unreadable
+    printf 'warning: deployment environment file is not a readable regular file: %s\n' \
+      "$env_file" >&2
+    return 0
+  fi
+
+  mode="$(deploy_environment_file_mode "$env_file" || true)"
+  owner="$(deploy_environment_file_owner "$env_file" || true)"
+  if [[ -n "$mode" && ! "$mode" =~ ^[0-7]*00$ ]]; then
+    DEPLOY_ENV_PERMISSION_WARNING=true
+    printf 'warning: deployment environment file has group/world permissions (%s); use chmod 600: %s\n' \
+      "$mode" "$env_file" >&2
+  fi
+  if [[ -n "$owner" && "$owner" != "$(id -u)" ]]; then
+    DEPLOY_ENV_PERMISSION_WARNING=true
+    printf 'warning: deployment environment file is not owned by the current user: %s\n' \
+      "$env_file" >&2
+  fi
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*= ]]; then
+      variable_name="${BASH_REMATCH[2]}"
+      if [[ -n "${!variable_name+x}" ]]; then
+        already_preserved=false
+        for index in "${!preserved_names[@]}"; do
+          if [[ "${preserved_names[$index]}" == "$variable_name" ]]; then
+            already_preserved=true
+            break
+          fi
+        done
+        if [[ "$already_preserved" != true ]]; then
+          preserved_names+=("$variable_name")
+          preserved_values+=("${!variable_name}")
+        fi
+      fi
+    fi
+  done <"$env_file"
+
+  [[ "$-" == *a* ]] && allexport_was_enabled=true
+  set -a
+  # shellcheck disable=SC1090 # Trusted operator-controlled host deployment config.
+  if source "$env_file"; then
+    source_status=0
+  else
+    source_status=$?
+  fi
+  [[ "$allexport_was_enabled" == true ]] || set +a
+
+  for index in "${!preserved_names[@]}"; do
+    printf -v "${preserved_names[$index]}" '%s' "${preserved_values[$index]}"
+    export "${preserved_names[$index]}"
+  done
+  if (( source_status != 0 )); then
+    DEPLOY_ENV_STATUS=error
+    printf 'warning: could not load deployment environment file: %s\n' \
+      "$env_file" >&2
+    return 0
+  fi
+  DEPLOY_ENV_STATUS=configured
+}
+
+load_host_runtime_config() {
+  local config_file="${JSB1_HOST_ENV_FILE:-}"
+  local key line value
+  if [[ -z "$config_file" ]]; then
+    [[ -n "${HOME:-}" ]] || return 0
+    config_file="$HOME/.config/jsb1/jsb1.env"
+  fi
+  [[ -r "$config_file" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ "$line" == export\ * ]] && line="${line#export }"
+    key="${line%%=*}"
+    value="${line#*=}"
+    case "$key" in
+      JSB0_REPOSITORY_URL|JSB0_REPOSITORY_PATH|JSB0_DEFAULT_BRANCH|\
+      JSB1_SCENARIO_SFTP_HOST|JSB1_SCENARIO_SFTP_PORT|JSB1_SCENARIO_SFTP_USER|\
+      JSB1_SCENARIO_SFTP_ROOT|JSB1_SCENARIO_SFTP_KEY_PATH|\
+      JSB1_SCENARIO_SFTP_PASSWORD|JSB1_SCENARIO_SFTP_KNOWN_HOSTS_PATH|\
+      JSB1_SCENARIO_SFTP_TIMEOUT_SEC) ;;
+      *) continue ;;
+    esac
+    if [[ ${#value} -ge 2 ]]; then
+      if [[ "$value" == \"*\" || "$value" == \'*\' ]]; then
+        value="${value:1:${#value}-2}"
+      fi
+    fi
+    if [[ -z "${!key+x}" ]]; then
+      printf -v "$key" '%s' "$value"
+      export "$key"
+    fi
+  done <"$config_file"
+}
+
+load_deploy_environment
+load_host_runtime_config
+
 STATE_ROOT="${JSB1_DEPLOY_STATE_DIR:-$REPO_ROOT/data/branch-deployments}"
 UNITS_DIR="$STATE_ROOT/units"
 WORKTREES_DIR="$STATE_ROOT/worktrees"
@@ -248,9 +385,18 @@ github_update_commit_status() {
   local -a arguments
   atomic_value "$unit_dir" github-commit-status-context "$context"
   atomic_value "$unit_dir" github-commit-status-commit "$commit"
+  if [[ "$state" == pending ]]; then
+    atomic_value "$unit_dir" github-commit-status pending
+    atomic_value "$unit_dir" github-commit-status-verification pending
+    rm -f "$unit_dir/github-commit-status-verified-at"
+  elif [[ "$state" == failure || "$state" == error ]]; then
+    atomic_value "$unit_dir" github-commit-status-verification not-applicable
+    rm -f "$unit_dir/github-commit-status-verified-at"
+  fi
   if ! token="$(github_auth_token)"; then
     atomic_value "$unit_dir" github-commit-status disabled
-    github_reporting_warning "skipped: JSB1_GITHUB_TOKEN/GITHUB_TOKEN is not configured"
+    atomic_value "$unit_dir" github-commit-status-verification disabled
+    github_reporting_warning "commit status reporting skipped: credential not configured"
     return
   fi
   error_file="$unit_dir/.github-commit-error.$$"
@@ -278,6 +424,44 @@ github_update_commit_status() {
     # shellcheck disable=SC2034 # Read by deploy.sh's EXIT trap.
     GITHUB_COMMIT_STATUS_STARTED=true
   fi
+  return 0
+}
+
+github_verify_commit_status() {
+  local unit_dir="$1"
+  local commit="$2"
+  local state="$3"
+  local context="$4"
+  local token error_file message attempt
+  atomic_value "$unit_dir" github-commit-status-context "$context"
+  atomic_value "$unit_dir" github-commit-status-commit "$commit"
+  if ! token="$(github_auth_token)"; then
+    atomic_value "$unit_dir" github-commit-status disabled
+    atomic_value "$unit_dir" github-commit-status-verification disabled
+    github_reporting_warning \
+      "commit status verification skipped: credential not configured" || true
+    return 0
+  fi
+
+  error_file="$unit_dir/.github-commit-verify-error.$$"
+  for attempt in 1 2 3; do
+    if JSB1_GITHUB_TOKEN="$token" python3 "$GITHUB_DEPLOYMENT_HELPER" \
+      --repository "$GITHUB_REPOSITORY" \
+      verify-status --commit "$commit" --state "$state" --context "$context" \
+      >/dev/null 2>"$error_file"; then
+      rm -f "$error_file"
+      atomic_value "$unit_dir" github-commit-status "$state"
+      atomic_value "$unit_dir" github-commit-status-verification verified
+      atomic_value "$unit_dir" github-commit-status-verified-at \
+        "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+      return 0
+    fi
+    (( attempt == 3 )) || sleep 1
+  done
+  message="$(github_helper_error "$error_file")"
+  atomic_value "$unit_dir" github-commit-status error
+  atomic_value "$unit_dir" github-commit-status-verification error
+  github_reporting_warning "commit status verification failed: $message" || true
   return 0
 }
 
@@ -453,8 +637,26 @@ PY
   [[ -n "$cert_hash" && "$cert_hash" == "$key_hash" ]] || die "TLS certificate and private key do not match"
 }
 
+validate_sftp_files() {
+  local repo_real key_real key_mode
+  if [[ -n "${JSB1_SCENARIO_SFTP_KEY_PATH:-}" ]]; then
+    [[ -r "$JSB1_SCENARIO_SFTP_KEY_PATH" && -f "$JSB1_SCENARIO_SFTP_KEY_PATH" ]] \
+      || die "SFTP private key is not a readable file"
+    repo_real="$(cd "$REPO_ROOT" && pwd -P)"
+    key_real="$(cd "$(dirname "$JSB1_SCENARIO_SFTP_KEY_PATH")" && pwd -P)/$(basename "$JSB1_SCENARIO_SFTP_KEY_PATH")"
+    case "$key_real" in "$repo_real"/*) die "SFTP private key must stay outside the repository" ;; esac
+    key_mode="$(stat -f '%OLp' "$JSB1_SCENARIO_SFTP_KEY_PATH" 2>/dev/null || stat -c '%a' "$JSB1_SCENARIO_SFTP_KEY_PATH")"
+    (( (8#$key_mode & 077) == 0 )) || die "SFTP private key must have owner-only permissions"
+  fi
+  if [[ -n "${JSB1_SCENARIO_SFTP_KNOWN_HOSTS_PATH:-}" ]]; then
+    [[ -r "$JSB1_SCENARIO_SFTP_KNOWN_HOSTS_PATH" && -f "$JSB1_SCENARIO_SFTP_KNOWN_HOSTS_PATH" ]] \
+      || die "SFTP known_hosts is not a readable file"
+  fi
+}
+
 export_compose_values() {
   local unit_dir="$1"
+  local runtime_repository_path
   JSB1_BUILD_CONTEXT="$(unit_value "$unit_dir" worktree)"
   JSB1_DEPLOY_BACKEND_DOCKERFILE="$REPO_ROOT/deploy/backend.Dockerfile"
   JSB1_DEPLOY_FRONTEND_DOCKERFILE="$REPO_ROOT/deploy/frontend.Dockerfile"
@@ -464,6 +666,7 @@ export_compose_values() {
   JSB1_DEPLOY_SLUG="$(basename "$unit_dir")"
   JSB1_DEPLOY_BRANCH="$(unit_value "$unit_dir" branch)"
   JSB1_DEPLOY_COMMIT="$(unit_value "$unit_dir" commit)"
+  JSB1_DEPLOY_BACKEND_IMAGE="jsb1-${JSB1_DEPLOY_SLUG}-backend:${JSB1_DEPLOY_COMMIT:0:12}"
   JSB1_DEPLOY_BUILT_AT="$(unit_value "$unit_dir" built-at 2>/dev/null || printf unknown)"
   JSB1_DEPLOY_HOSTNAME="$(unit_value "$unit_dir" hostname)"
   JSB1_DEPLOY_PORT="$(unit_value "$unit_dir" port)"
@@ -472,13 +675,40 @@ export_compose_values() {
   JSB1_TLS_KEY_PATH="$TLS_KEY_PATH"
   JSB1_CLOUDFLARED_CONFIG_PATH="$CLOUDFLARED_CONFIG"
   JSB1_CLOUDFLARED_CREDENTIALS="$CLOUDFLARED_CREDENTIALS"
-  export JSB1_BUILD_CONTEXT JSB1_DEPLOY_BACKEND_DOCKERFILE
+  JSB0_REPOSITORY_URL="${JSB0_REPOSITORY_URL:-https://github.com/egod1537/jsb0.git}"
+  JSB0_DEFAULT_BRANCH="${JSB0_DEFAULT_BRANCH:-impl}"
+  validate_sftp_files
+  JSB1_SCENARIO_SFTP_CONTAINER_KEY_PATH=""
+  JSB1_SCENARIO_SFTP_CONTAINER_KNOWN_HOSTS_PATH=""
+  if [[ -n "${JSB1_SCENARIO_SFTP_KEY_PATH:-}" ]]; then
+    [[ -f "$JSB1_SCENARIO_SFTP_KEY_PATH" ]] || die "SFTP private key is not a file"
+    JSB1_SCENARIO_SFTP_CONTAINER_KEY_PATH=/run/secrets/jsb1-scenario-sftp-key
+  fi
+  if [[ -n "${JSB1_SCENARIO_SFTP_KNOWN_HOSTS_PATH:-}" ]]; then
+    [[ -f "$JSB1_SCENARIO_SFTP_KNOWN_HOSTS_PATH" ]] || die "SFTP known_hosts is not a file"
+    JSB1_SCENARIO_SFTP_CONTAINER_KNOWN_HOSTS_PATH=/run/secrets/jsb1-scenario-known-hosts
+  fi
+  runtime_repository_path="${JSB0_REPOSITORY_PATH:-$unit_dir/data/repositories/jsb0}"
+  if [[ "$runtime_repository_path" != /* ]]; then
+    runtime_repository_path="$REPO_ROOT/${runtime_repository_path#./}"
+  fi
+  [[ "$runtime_repository_path" != / ]] || die "JSB0_REPOSITORY_PATH cannot be filesystem root"
+  mkdir -p "$runtime_repository_path"
+  JSB0_REPOSITORY_PATH="$(cd "$runtime_repository_path" && pwd -P)"
+  export JSB1_BUILD_CONTEXT JSB1_DEPLOY_BACKEND_DOCKERFILE JSB1_DEPLOY_BACKEND_IMAGE
   export JSB1_DEPLOY_FRONTEND_DOCKERFILE JSB1_DEPLOY_CONFIG_CONTEXT
   export JSB1_DEPLOY_DATA_DIR JSB1_SCENARIO_DIR JSB1_DEPLOY_SLUG JSB1_DEPLOY_BRANCH
   export JSB1_DEPLOY_COMMIT JSB1_DEPLOY_BUILT_AT JSB1_DEPLOY_HOSTNAME
   export JSB1_DEPLOY_PORT JSB1_CADDY_ROUTES_DIR
   export JSB1_TLS_CERT_PATH JSB1_TLS_KEY_PATH JSB1_CLOUDFLARED_CONFIG_PATH
   export JSB1_CLOUDFLARED_CREDENTIALS
+  export JSB0_REPOSITORY_URL JSB0_REPOSITORY_PATH JSB0_DEFAULT_BRANCH
+  export JSB1_SCENARIO_SFTP_HOST JSB1_SCENARIO_SFTP_PORT
+  export JSB1_SCENARIO_SFTP_USER JSB1_SCENARIO_SFTP_ROOT
+  export JSB1_SCENARIO_SFTP_KEY_PATH JSB1_SCENARIO_SFTP_PASSWORD
+  export JSB1_SCENARIO_SFTP_KNOWN_HOSTS_PATH JSB1_SCENARIO_SFTP_TIMEOUT_SEC
+  export JSB1_SCENARIO_SFTP_CONTAINER_KEY_PATH
+  export JSB1_SCENARIO_SFTP_CONTAINER_KNOWN_HOSTS_PATH
 }
 
 resolve_cloudflare_tunnel() {

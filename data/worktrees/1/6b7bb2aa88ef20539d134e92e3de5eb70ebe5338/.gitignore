@@ -1,0 +1,22 @@
+# CMake build outputs
+/build/
+/build-headless*/
+
+# Downloaded/runtime dependencies
+/.deps/
+
+# Runtime-generated files
+/runtime/
+
+# clangd symlink
+/compile_commands.json
+
+# Editors
+/.idea/
+/.vscode/
+
+# OS files
+.DS_Store
+
+/.cache/
+/JSBout*.csv

@@ -5,62 +5,71 @@ import shutil
 from pathlib import Path
 from typing import Annotated, Any
 
-import numpy as np
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import FileResponse
 
-from app.analysis.downsampling import uniform_downsample
-from app.analysis.mcap_reader import McapReadError, McapRunReader, canonical_name
+from app.analysis.mcap_reader import McapReadError
+from app.analysis.roll_hold_analyzer import RollHoldAnalysisVariants
+from app.api.build_routes import router as build_router
+from app.api.comparison_routes import router as comparison_router
 from app.api.dependencies import (
-    get_build_manager,
-    get_build_scheduler,
-    get_build_info,
-    get_instances,
     get_app_settings,
     get_artifact_service,
+    get_build_info,
+    get_run_creation,
+    get_run_deletion,
+    get_run_analysis,
+    get_runtime_variants,
     get_database,
-    get_reader,
+    get_instances,
+    get_telemetry_queries,
     get_repository,
-    get_repository_manager,
     get_scenarios,
-    get_scheduler,
 )
-from app.api.build_routes import router as build_router
+from app.api.deployment_routes import router as deployment_router
 from app.api.repository_routes import router as repository_router
 from app.api.runtime_routes import router as runtime_router
-from app.api.deployment_routes import router as deployment_router
+from app.api.scenario_routes import router as scenario_router
+from app.api.scenario_inspection_routes import router as scenario_inspection_router
 from app.config.settings import Settings
-from app.domain.models import RunCreate, RunDetail, RunStatus, SignalResponse
 from app.domain.build_info import BuildInfo
-from app.repositories.instances import InstanceRepository
-from app.services.build_manager import BuildManager
+from app.domain.models import (
+    AvailableSignalsResponse,
+    RunCreate,
+    RunDetail,
+    RunStatus,
+    SignalResponse,
+)
 from app.repositories.database import Database
+from app.repositories.instances import InstanceRepository
 from app.repositories.runs import RunRepository
 from app.services.artifacts import ArtifactService, UnsafeArtifactPath
-from app.services.scenarios import InvalidScenario, ScenarioService
+from app.domain.errors import SnapshotWriteFailed
 from app.services.repository_manager import (
     GitOperationError,
     InvalidRepositoryPath,
-    RepositoryManager,
     RuntimeRepositoryNotConfigured,
+    RuntimeRepositoryUnavailable,
 )
-from app.workers.build_scheduler import InProcessBuildScheduler
-from app.workers.scheduler import InProcessRunScheduler
-
+from app.services.scenarios import InvalidScenario, ScenarioService
+from app.services.runtime_variants import RuntimeVariantContractError
+from app.services.run_creation import CreateRunCommand, RunCreationService
+from app.services.run_analysis import AnalyzerNotApplicable, RunAnalysisService
+from app.services.run_deletion import (
+    ActiveRunDeletionNotAllowed,
+    RunDeletionService,
+    UnsafeRunDirectory,
+)
+from app.services.telemetry_queries import TelemetryQueryService
 
 router = APIRouter(prefix="/api")
 router.include_router(repository_router)
 router.include_router(runtime_router)
 router.include_router(build_router)
 router.include_router(deployment_router)
-ANGULAR_SIGNALS = {
-    "commanded_roll": "deg",
-    "roll": "deg",
-    "commanded_roll_rate": "deg/s",
-    "roll_rate": "deg/s",
-    "aileron": "deg",
-}
-RAD_TO_DEG = 180.0 / np.pi
+router.include_router(scenario_router)
+router.include_router(scenario_inspection_router)
+router.include_router(comparison_router)
 
 
 def require_run(repository: RunRepository, run_id: int):
@@ -90,148 +99,40 @@ def version(build_info: Annotated[BuildInfo, Depends(get_build_info)]) -> BuildI
     return build_info
 
 
-@router.get("/scenarios")
-def scenarios(service: Annotated[ScenarioService, Depends(get_scenarios)]) -> list[str]:
-    return service.list()
-
-
-@router.get("/autopilots")
-def autopilots(
-    settings: Annotated[Settings, Depends(get_app_settings)],
-) -> list[str]:
-    return settings.autopilots
-
-
 @router.post("/runs", status_code=202)
 async def create_run(
     body: RunCreate,
-    repository: Annotated[RunRepository, Depends(get_repository)],
-    scenarios: Annotated[ScenarioService, Depends(get_scenarios)],
-    scheduler: Annotated[InProcessRunScheduler, Depends(get_scheduler)],
-    settings: Annotated[Settings, Depends(get_app_settings)],
-    build_manager: Annotated[BuildManager, Depends(get_build_manager)],
-    build_scheduler: Annotated[InProcessBuildScheduler, Depends(get_build_scheduler)],
-    repository_manager: Annotated[RepositoryManager, Depends(get_repository_manager)],
-    instances: Annotated[InstanceRepository, Depends(get_instances)],
+    service: Annotated[RunCreationService, Depends(get_run_creation)],
 ) -> dict[str, Any]:
     try:
-        scenario_path = scenarios.resolve(body.scenario)
-    except InvalidScenario as exc:
+        result = await service.create(
+            CreateRunCommand(
+                scenario=body.scenario,
+                scenario_source=body.scenario_source,
+                variant=body.variant,
+                legacy_autopilot=body.autopilot,
+                repository_id=body.repository_id,
+                branch=body.branch,
+                commit_sha=body.commit_sha,
+                build_id=body.build_id,
+                controller_parameters=body.controller_parameters,
+            )
+        )
+        return result.__dict__
+    except RuntimeRepositoryNotConfigured as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except RuntimeRepositoryUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except SnapshotWriteFailed as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except GitOperationError as exc:
+        if str(exc).startswith("branch not found:"):
+            raise HTTPException(status_code=404, detail="Branch no longer exists") from exc
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    if body.autopilot not in settings.autopilots:
-        raise HTTPException(status_code=422, detail="unknown autopilot")
-    repository_id: int | None = None
-    branch: str | None = None
-    commit_sha = body.commit_sha
-    build_id = body.build_id
-    build_reused = False
-    build_status: str | None = None
-    if body.branch is not None:
-        configured_runtime = body.repository_id is None
-        if configured_runtime:
-            try:
-                runtime_repository = await asyncio.to_thread(
-                    repository_manager.runtime_repository,
-                    settings.runtime_repository_name,
-                )
-            except RuntimeRepositoryNotConfigured as exc:
-                raise HTTPException(status_code=503, detail=str(exc)) from exc
-            except (GitOperationError, InvalidRepositoryPath) as exc:
-                raise HTTPException(
-                    status_code=503,
-                    detail="JSB0 Runtime repository is not configured",
-                ) from exc
-            repository_id = runtime_repository.id
-        else:
-            repository_id = body.repository_id
-        assert repository_id is not None
-        try:
-            await asyncio.to_thread(repository_manager.fetch, repository_id)
-        except KeyError as exc:
-            detail = (
-                "JSB0 Runtime repository is not configured"
-                if configured_runtime
-                else "repository not found"
-            )
-            raise HTTPException(status_code=404, detail=detail) from exc
-        except (GitOperationError, InvalidRepositoryPath) as exc:
-            detail = (
-                "Could not refresh JSB0 branches"
-                if configured_runtime
-                else str(exc)
-            )
-            raise HTTPException(
-                status_code=502 if configured_runtime else 422, detail=detail
-            ) from exc
-        try:
-            resolved = await asyncio.to_thread(
-                repository_manager.resolve_branch, repository_id, body.branch
-            )
-        except GitOperationError as exc:
-            if str(exc).startswith("branch not found:"):
-                raise HTTPException(
-                    status_code=404, detail="Branch no longer exists"
-                ) from exc
-            detail = "Could not resolve JSB0 branch" if configured_runtime else str(exc)
-            raise HTTPException(status_code=422, detail=detail) from exc
-        except (KeyError, InvalidRepositoryPath) as exc:
-            detail = (
-                "Could not resolve JSB0 branch" if configured_runtime else str(exc)
-            )
-            raise HTTPException(status_code=422, detail=detail) from exc
-        try:
-            build, build_reused = await asyncio.to_thread(
-                build_manager.request_resolved, resolved
-            )
-        except (KeyError, InvalidRepositoryPath, RuntimeError) as exc:
-            status_code = 404 if isinstance(exc, KeyError) else 422
-            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
-        branch = body.branch
-        commit_sha = resolved.commit_sha
-        build_id = build.id
-        build_status = build.status.value
-    elif body.build_id is not None:
-        try:
-            build, _ = build_manager.require_runnable(body.build_id)
-        except (KeyError, RuntimeError, InvalidRepositoryPath) as exc:
-            status_code = 404 if isinstance(exc, KeyError) else 422
-            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
-        if commit_sha is not None and commit_sha != build.commit_sha:
-            raise HTTPException(
-                status_code=422, detail="commit_sha does not match selected build"
-            )
-        repository_id = build.repository_id
-        commit_sha = build.commit_sha
-    run = repository.create(
-        repository_id=repository_id,
-        branch=branch,
-        build_id=build_id,
-        commit_sha=commit_sha,
-        scenario_name=body.scenario,
-        scenario_path=str(scenario_path),
-        autopilot=body.autopilot,
-    )
-    relative_output = f"runs/{run.id:06d}"
-    repository.set_output_directory(run.id, relative_output)
-    if build_id is not None:
-        instances.create(build_id=build_id, run_id=run.id)
-    if branch is not None and not build_reused:
-        assert build_id is not None
-        build_scheduler.submit(build_id)
-    scheduler.submit(
-        run.id,
-        wait_for_build_id=build_id if branch is not None else None,
-    )
-    return {
-        "id": run.id,
-        "status": RunStatus.QUEUED.value,
-        "repository_id": repository_id,
-        "branch": branch,
-        "build_id": build_id,
-        "build_status": build_status,
-        "build_reused": build_reused,
-        "commit_sha": commit_sha,
-    }
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="repository or build not found") from exc
+    except (InvalidScenario, RuntimeVariantContractError, InvalidRepositoryPath, ValueError, RuntimeError, OSError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/runs")
@@ -250,14 +151,35 @@ def run_detail(
     repository: Annotated[RunRepository, Depends(get_repository)],
     artifacts: Annotated[ArtifactService, Depends(get_artifact_service)],
     instances: Annotated[InstanceRepository, Depends(get_instances)],
+    scenarios: Annotated[ScenarioService, Depends(get_scenarios)],
 ) -> RunDetail:
     run = require_run(repository, run_id)
+    if run.scenario_type is None:
+        scenario_type = scenarios.scenario_type_from_snapshot(Path(run.scenario_path))
+        if scenario_type is not None:
+            run = run.model_copy(update={"scenario_type": scenario_type})
     return RunDetail(
         run=run,
         metrics=repository.get_metrics(run_id),
         artifacts=[artifacts.public(row) for row in repository.get_artifact_rows(run_id)],
         instance=instances.get_for_run(run_id),
     )
+
+
+@router.delete("/runs/{run_id}", status_code=204)
+def delete_run(
+    run_id: int,
+    service: Annotated[RunDeletionService, Depends(get_run_deletion)],
+) -> Response:
+    try:
+        service.delete(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="run not found") from exc
+    except ActiveRunDeletionNotAllowed as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except UnsafeRunDirectory as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return Response(status_code=204)
 
 
 @router.get("/runs/{run_id}/metrics")
@@ -269,47 +191,71 @@ def run_metrics(
     return {metric.name: metric.value for metric in repository.get_metrics(run_id)}
 
 
+@router.get(
+    "/runs/{run_id}/analysis/roll-hold",
+    response_model=RollHoldAnalysisVariants,
+)
+def run_roll_hold_analysis(
+    run_id: int,
+    service: Annotated[RunAnalysisService, Depends(get_run_analysis)],
+) -> RollHoldAnalysisVariants:
+    try:
+        return service.analyze_roll_hold(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="run or telemetry artifact not found") from exc
+    except AnalyzerNotApplicable as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (OSError, ValueError, McapReadError, UnsafeArtifactPath) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.get("/runs/{run_id}/signals", response_model=SignalResponse)
 def run_signals(
     run_id: int,
     repository: Annotated[RunRepository, Depends(get_repository)],
-    reader: Annotated[McapRunReader, Depends(get_reader)],
-    artifacts: Annotated[ArtifactService, Depends(get_artifact_service)],
-    channels: Annotated[str, Query(min_length=1)],
+    telemetry: Annotated[TelemetryQueryService, Depends(get_telemetry_queries)],
+    signals: Annotated[str | None, Query(min_length=1)] = None,
+    channels: Annotated[str | None, Query(min_length=1, deprecated=True)] = None,
+    variant: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
     start: Annotated[float | None, Query(ge=0)] = None,
     end: Annotated[float | None, Query(ge=0)] = None,
     max_points: Annotated[int, Query(ge=10, le=20_000)] = 2000,
 ) -> SignalResponse:
     require_run(repository, run_id)
-    if start is not None and end is not None and end < start:
-        raise HTTPException(status_code=422, detail="end must be greater than or equal to start")
-    names = [canonical_name(item) for item in channels.split(",") if item.strip()]
-    if not names or len(names) > 20:
-        raise HTTPException(status_code=422, detail="request between 1 and 20 channels")
     try:
-        row = repository.get_artifact_row(run_id, "telemetry")
-        telemetry_path = artifacts.resolve(row["path"])
-        time, values = reader.read_aligned(telemetry_path, names, start=start, end=end)
+        requested = signals or channels
+        if requested is None:
+            raise ValueError("signals is required")
+        return telemetry.signals(
+            run_id,
+            requested,
+            variant=variant,
+            start=start,
+            end=end,
+            max_points=max_points,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="telemetry artifact not found") from exc
+    except (McapReadError, UnsafeArtifactPath, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get(
+    "/runs/{run_id}/signals/available",
+    response_model=AvailableSignalsResponse,
+)
+def available_run_signals(
+    run_id: int,
+    repository: Annotated[RunRepository, Depends(get_repository)],
+    telemetry: Annotated[TelemetryQueryService, Depends(get_telemetry_queries)],
+) -> AvailableSignalsResponse:
+    require_run(repository, run_id)
+    try:
+        return telemetry.available(run_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="telemetry artifact not found") from exc
     except (McapReadError, UnsafeArtifactPath) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    source_points = len(time)
-    time, values = uniform_downsample(time, values, max_points)
-    units: dict[str, str] = {}
-    for name in list(values):
-        if name in ANGULAR_SIGNALS:
-            values[name] = values[name] * RAD_TO_DEG
-            units[name] = ANGULAR_SIGNALS[name]
-        else:
-            units[name] = "raw"
-    return SignalResponse(
-        time=time.tolist(),
-        series={name: value.tolist() for name, value in values.items()},
-        units=units,
-        source_points=source_points,
-        returned_points=len(time),
-    )
 
 
 @router.get("/runs/{run_id}/artifacts")

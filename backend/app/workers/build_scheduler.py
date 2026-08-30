@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Protocol
 
-from app.services.build_manager import BuildManager
 
 
 logger = logging.getLogger(__name__)
 
 
+class BuildExecutor(Protocol):
+    async def execute(self, build_id: int) -> None: ...
+
+
 class InProcessBuildScheduler:
-    def __init__(self, manager: BuildManager, max_concurrent_builds: int) -> None:
+    def __init__(self, manager: BuildExecutor, max_concurrent_builds: int) -> None:
         self.manager = manager
         self._semaphore = asyncio.Semaphore(max_concurrent_builds)
         self._tasks: dict[int, asyncio.Task[None]] = {}
@@ -22,6 +26,13 @@ class InProcessBuildScheduler:
         self._tasks[build_id] = task
         task.add_done_callback(lambda _task: self._tasks.pop(build_id, None))
         logger.info("build submitted id=%s", build_id)
+
+    def is_scheduled(self, build_id: int) -> bool:
+        return build_id in self._tasks
+
+    @property
+    def active_count(self) -> int:
+        return len(self._tasks)
 
     async def _run(self, build_id: int) -> None:
         async with self._semaphore:

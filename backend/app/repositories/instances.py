@@ -58,3 +58,12 @@ class InstanceRepository:
                 (utc_now(),),
             )
             return cursor.rowcount
+
+    def fail_running_from_previous_worker(self) -> int:
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                """UPDATE instances SET status = 'failed', stopped_at = ?
+                   WHERE status = 'running'""",
+                (utc_now(),),
+            )
+            return cursor.rowcount

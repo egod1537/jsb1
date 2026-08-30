@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package jsb.telemetry.v1;
+
+enum SimulationEventType {
+  SIMULATION_EVENT_UNSPECIFIED = 0;
+  SIMULATION_EVENT_STARTED = 1;
+  SIMULATION_EVENT_STOPPED = 2;
+  SIMULATION_EVENT_COMMAND_APPLIED = 3;
+  SIMULATION_EVENT_WARNING = 4;
+  SIMULATION_EVENT_ERROR = 5;
+}
+
+// Runtime/scenario event published on the simulation event channel.
+message SimulationEvent {
+  uint64 sim_time_ns = 1;
+  SimulationEventType type = 2;
+  optional double target_roll_rad = 3;
+  string message = 4;
+}

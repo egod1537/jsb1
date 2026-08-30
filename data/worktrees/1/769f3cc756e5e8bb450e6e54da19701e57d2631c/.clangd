@@ -1,0 +1,12 @@
+CompileFlags:
+  CompilationDatabase: build
+  # GCC 16 defaults to C++20, so CMake may omit the otherwise redundant flag.
+  # clangd still defaults to C++17 and needs the project's language level.
+  Add: -std=gnu++20
+  Remove:
+    - -fmodules-ts
+    - -fmodule-mapper=*
+    - -fdeps-format=*
+    # GCC's generated precompiled header is not portable to clangd's parser.
+    - -include
+    - -Winvalid-pch

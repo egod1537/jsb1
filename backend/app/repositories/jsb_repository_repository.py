@@ -66,6 +66,37 @@ class JsbRepositoryRepository:
             )
         return self.get(repository_id)
 
+    def update_configuration(
+        self,
+        repository_id: int,
+        *,
+        remote_url: str,
+        local_path: str,
+        default_branch: str,
+    ) -> Repository:
+        timestamp = utc_now()
+        try:
+            with self.database.connect() as connection:
+                cursor = connection.execute(
+                    """UPDATE repositories
+                       SET remote_url = ?, local_path = ?, default_branch = ?, updated_at = ?
+                       WHERE id = ?""",
+                    (
+                        remote_url,
+                        local_path,
+                        default_branch,
+                        timestamp,
+                        repository_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise KeyError(repository_id)
+        except sqlite3.IntegrityError as exc:
+            raise RepositoryConflict(
+                "configured JSB0 repository path conflicts with an existing repository"
+            ) from exc
+        return self.get(repository_id)
+
     def delete(self, repository_id: int) -> None:
         try:
             with self.database.connect() as connection:

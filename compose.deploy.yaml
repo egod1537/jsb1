@@ -6,6 +6,7 @@ x-jsb1-logging: &jsb1-logging
 
 services:
   backend:
+    image: ${JSB1_DEPLOY_BACKEND_IMAGE:?set JSB1_DEPLOY_BACKEND_IMAGE}
     build:
       context: ${JSB1_BUILD_CONTEXT:?set JSB1_BUILD_CONTEXT}
       dockerfile: ${JSB1_DEPLOY_BACKEND_DOCKERFILE:?set JSB1_DEPLOY_BACKEND_DOCKERFILE}
@@ -18,13 +19,23 @@ services:
       JSB_SIM_RUNNER_PATH: jsb-sim-runner
       JSB_SCENARIO_DIR: /scenarios
       JSB1_REPOSITORY_ROOT: /data/repositories
-      JSB1_RUNTIME_REPOSITORY_NAME: ${JSB1_RUNTIME_REPOSITORY_NAME:-jsb0}
+      JSB0_REPOSITORY_URL: ${JSB0_REPOSITORY_URL:-https://github.com/egod1537/jsb0.git}
+      JSB0_REPOSITORY_PATH: /runtime/jsb0
+      JSB0_DEFAULT_BRANCH: ${JSB0_DEFAULT_BRANCH:-impl}
+      JSB1_SCENARIO_SFTP_HOST: ${JSB1_SCENARIO_SFTP_HOST:-}
+      JSB1_SCENARIO_SFTP_PORT: ${JSB1_SCENARIO_SFTP_PORT:-22}
+      JSB1_SCENARIO_SFTP_USER: ${JSB1_SCENARIO_SFTP_USER:-}
+      JSB1_SCENARIO_SFTP_ROOT: ${JSB1_SCENARIO_SFTP_ROOT:-/}
+      JSB1_SCENARIO_SFTP_KEY_PATH: ${JSB1_SCENARIO_SFTP_CONTAINER_KEY_PATH:-}
+      JSB1_SCENARIO_SFTP_PASSWORD: ${JSB1_SCENARIO_SFTP_PASSWORD:-}
+      JSB1_SCENARIO_SFTP_KNOWN_HOSTS_PATH: ${JSB1_SCENARIO_SFTP_CONTAINER_KNOWN_HOSTS_PATH:-}
+      JSB1_SCENARIO_SFTP_TIMEOUT_SEC: ${JSB1_SCENARIO_SFTP_TIMEOUT_SEC:-15}
       JSB1_WORKTREE_ROOT: /data/worktrees
       JSB1_BUILD_ROOT: /data/builds
       JSB1_DEPLOYMENT_ROOT: /data/deployments
       JSB1_MAX_CONCURRENT_RUNS: "1"
+      JSB1_EXECUTION_MODE: external
       JSB1_RUN_TIMEOUT_SEC: "1800"
-      JSB1_AUTOPILOTS: '["baseline","primary"]'
       JSB1_CORS_ORIGINS: '[]'
       JSB1_DEPLOY_BRANCH: ${JSB1_DEPLOY_BRANCH:?set JSB1_DEPLOY_BRANCH}
       JSB1_DEPLOY_COMMIT: ${JSB1_DEPLOY_COMMIT:?set JSB1_DEPLOY_COMMIT}
@@ -37,6 +48,17 @@ services:
       - type: bind
         source: ${JSB1_SCENARIO_DIR:?set JSB1_SCENARIO_DIR}
         target: /scenarios
+        read_only: true
+      - type: bind
+        source: ${JSB0_REPOSITORY_PATH:?set JSB0_REPOSITORY_PATH}
+        target: /runtime/jsb0
+      - type: bind
+        source: ${JSB1_SCENARIO_SFTP_KEY_PATH:-/dev/null}
+        target: /run/secrets/jsb1-scenario-sftp-key
+        read_only: true
+      - type: bind
+        source: ${JSB1_SCENARIO_SFTP_KNOWN_HOSTS_PATH:-/dev/null}
+        target: /run/secrets/jsb1-scenario-known-hosts
         read_only: true
     healthcheck:
       test:
@@ -53,6 +75,43 @@ services:
       net.mangagaki.jsb1.branch: ${JSB1_DEPLOY_BRANCH:?set JSB1_DEPLOY_BRANCH}
       net.mangagaki.jsb1.commit: ${JSB1_DEPLOY_COMMIT:?set JSB1_DEPLOY_COMMIT}
       net.mangagaki.jsb1.built-at: ${JSB1_DEPLOY_BUILT_AT:?set JSB1_DEPLOY_BUILT_AT}
+    logging: *jsb1-logging
+    restart: unless-stopped
+
+  worker:
+    image: ${JSB1_DEPLOY_BACKEND_IMAGE:?set JSB1_DEPLOY_BACKEND_IMAGE}
+    command: ["python", "-m", "app.worker"]
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      JSB1_DATA_DIR: /data
+      JSB1_DATABASE_PATH: /data/jsb1.db
+      JSB_SIM_RUNNER_PATH: jsb-sim-runner
+      JSB1_REPOSITORY_ROOT: /data/repositories
+      JSB0_REPOSITORY_URL: ${JSB0_REPOSITORY_URL:-https://github.com/egod1537/jsb0.git}
+      JSB0_REPOSITORY_PATH: /runtime/jsb0
+      JSB0_DEFAULT_BRANCH: ${JSB0_DEFAULT_BRANCH:-impl}
+      JSB1_WORKTREE_ROOT: /data/worktrees
+      JSB1_BUILD_ROOT: /data/builds
+      JSB1_MAX_CONCURRENT_RUNS: "1"
+      JSB1_RUN_TIMEOUT_SEC: "1800"
+    volumes:
+      - type: bind
+        source: ${JSB1_DEPLOY_DATA_DIR:?set JSB1_DEPLOY_DATA_DIR}
+        target: /data
+      - type: bind
+        source: ${JSB0_REPOSITORY_PATH:?set JSB0_REPOSITORY_PATH}
+        target: /runtime/jsb0
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 2s
+    labels:
+      net.mangagaki.jsb1.branch-slug: ${JSB1_DEPLOY_SLUG:?set JSB1_DEPLOY_SLUG}
+      net.mangagaki.jsb1.role: execution-worker
     logging: *jsb1-logging
     restart: unless-stopped
 

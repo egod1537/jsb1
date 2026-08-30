@@ -15,7 +15,7 @@ from app.domain.build import Build, BuildCreate
 from app.repositories.builds import BuildRepository
 from app.services.build_manager import BuildManager
 from app.services.repository_manager import GitOperationError, InvalidRepositoryPath
-from app.workers.build_scheduler import InProcessBuildScheduler
+from app.workers.dispatch import BuildDispatcher
 
 
 router = APIRouter(prefix="/builds", tags=["builds"])
@@ -40,7 +40,7 @@ def list_builds(
 async def create_build(
     body: BuildCreate,
     manager: Annotated[BuildManager, Depends(get_build_manager)],
-    scheduler: Annotated[InProcessBuildScheduler, Depends(get_build_scheduler)],
+    scheduler: Annotated[BuildDispatcher, Depends(get_build_scheduler)],
 ) -> Build:
     try:
         build, reused = await asyncio.to_thread(
@@ -72,17 +72,18 @@ async def rebuild(
     build_id: int,
     builds: Annotated[BuildRepository, Depends(get_builds)],
     manager: Annotated[BuildManager, Depends(get_build_manager)],
-    scheduler: Annotated[InProcessBuildScheduler, Depends(get_build_scheduler)],
+    scheduler: Annotated[BuildDispatcher, Depends(get_build_scheduler)],
 ) -> Build:
     try:
         previous = builds.get(build_id)
-        build, _ = await asyncio.to_thread(
+        build, reused = await asyncio.to_thread(
             manager.request,
             previous.repository_id,
             previous.commit_sha,
             rebuild=True,
         )
-        scheduler.submit(build.id)
+        if not reused:
+            scheduler.submit(build.id)
         return build
     except (KeyError, GitOperationError, InvalidRepositoryPath, RuntimeError) as exc:
         raise _build_error(exc) from exc

@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Protocol
 
-from app.services.execution import RunExecutionService
 from app.workers.build_scheduler import InProcessBuildScheduler
 
 
 logger = logging.getLogger(__name__)
+
+
+class RunExecutor(Protocol):
+    async def execute(self, run_id: int) -> None: ...
 
 
 class InProcessRunScheduler:
@@ -15,7 +19,7 @@ class InProcessRunScheduler:
 
     def __init__(
         self,
-        execution: RunExecutionService,
+        execution: RunExecutor,
         max_concurrent_runs: int,
         build_scheduler: InProcessBuildScheduler | None = None,
     ) -> None:
@@ -33,6 +37,13 @@ class InProcessRunScheduler:
         self._tasks[run_id] = task
         task.add_done_callback(lambda _task: self._tasks.pop(run_id, None))
         logger.info("run submitted id=%s", run_id)
+
+    def is_scheduled(self, run_id: int) -> bool:
+        return run_id in self._tasks
+
+    @property
+    def active_count(self) -> int:
+        return len(self._tasks)
 
     async def _run(self, run_id: int, wait_for_build_id: int | None) -> None:
         if wait_for_build_id is not None:

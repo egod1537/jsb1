@@ -1,11 +1,23 @@
+import { Button, ButtonGroup } from "@blueprintjs/core";
+import { IconNames } from "@blueprintjs/icons";
 import { Link, useParams } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { RunAnalysisView } from "../features/plots/RunAnalysisView";
+import { createRunVariantDataSource, type IntraRunView } from "../features/plots/runVariantDataSource";
+import { api } from "../api/client";
 import { ErrorPanel, Loading } from "../components/Loading";
 import { PageHeader } from "../components/PageHeader";
 import { StatusTag } from "../components/StatusTag";
-import { TimeSeriesChart } from "../components/TimeSeriesChart";
-import { useRun, useSignals } from "../features/runs/useRunData";
+import { ScenarioViewerDialog } from "../features/scenarios/ScenarioViewerDialog";
+import { useRun } from "../features/runs/useRunData";
+import { ExecutionPipeline, RUN_PIPELINE_GROUPS } from "../features/pipeline/ExecutionPipeline";
+import { RollHoldAnalyzerPanel } from "../features/runs/RollHoldAnalyzerPanel";
+import { ArtifactsDialog } from "../features/runs/ArtifactsDialog";
+import { BuildDetailsDialog } from "../features/builds/BuildDetailsDialog";
+import { useBuildDetails } from "../features/builds/useBuildDetails";
+import { ControllerParametersDialog } from "../features/parameters/ControllerParametersDialog";
+import type { ControllerParameterDefinition } from "../types/api";
 
-const channels = ["commanded_roll", "roll", "commanded_roll_rate", "roll_rate", "aileron"];
 const metricLabels: Record<string, string> = {
   settling_time_sec: "Settling time",
   overshoot_deg: "Overshoot",
@@ -28,13 +40,44 @@ function value(number: number | null, unit: string) {
 export function RunDetailPage() {
   const id = Number(useParams().id);
   const detail = useRun(id);
+  const [scenarioViewerOpen, setScenarioViewerOpen] = useState(false);
+  const [artifactsOpen, setArtifactsOpen] = useState(false);
+  const [buildDetailsOpen, setBuildDetailsOpen] = useState(false);
+  const [parametersOpen, setParametersOpen] = useState(false);
+  const [parameterDefinitions, setParameterDefinitions] = useState<ControllerParameterDefinition[]>([]);
+  const [view, setView] = useState<IntraRunView>("overlay");
+  const loadScenarioSnapshot = useCallback(() => api.runScenario(id), [id]);
   const completed = detail.data?.run.status === "completed";
-  const signals = useSignals(id, completed, channels);
+  const buildDetails = useBuildDetails(detail.data?.run.build_id ?? null);
+  useEffect(() => {
+    if (!parametersOpen || !detail.data?.run.branch) return;
+    let active = true;
+    api.runtimeParameters(detail.data.run.branch)
+      .then((catalog) => { if (active) setParameterDefinitions(catalog.parameters); })
+      .catch(() => { if (active) setParameterDefinitions([]); });
+    return () => { active = false; };
+  }, [detail.data?.run.branch, parametersOpen]);
+  const runVariants = detail.data
+    ? detail.data.run.variants?.length
+      ? detail.data.run.variants
+      : [detail.data.run.execution_variant]
+    : [];
+  useEffect(() => {
+    if (runVariants.length > 1) setView("overlay");
+    else if (runVariants[0] === "primary" || runVariants[0] === "baseline") {
+      setView(runVariants[0]);
+    }
+  }, [id, runVariants.join(",")]);
+  const plotDataSource = useMemo(
+    () => createRunVariantDataSource(id, runVariants, view),
+    [id, runVariants.join(","), view],
+  );
   if (!Number.isInteger(id)) return <main><ErrorPanel message="Invalid run id" /></main>;
   if (detail.loading) return <main><Loading label="Loading run" /></main>;
   if (detail.error || !detail.data) return <main><ErrorPanel message={detail.error ?? "Run not found"} /></main>;
   const { run, metrics, artifacts } = detail.data;
-  const telemetry = signals.data;
+  const buildReused = run.stages.some((stage) => stage.id === "resolve_build" && stage.message?.toLowerCase().includes("reused"))
+    || buildDetails.data?.reused === true;
   const metricsPanel = metrics.length > 0 && <section className="panel metric-panel">
     <header className="panel-header"><span className="panel-title">Response metrics</span></header>
     <dl className="metric-list">
@@ -44,51 +87,80 @@ export function RunDetailPage() {
       </div>)}
     </dl>
   </section>;
-  const artifactsPanel = artifacts.length > 0 && <section className="panel artifact-panel">
-    <header className="panel-header"><span className="panel-title">Artifacts</span><span className="panel-count">{artifacts.length}</span></header>
-    <div className="artifact-list">
-      {artifacts.map((artifact) => <a key={artifact.id} href={artifact.download_url}>
-        <span title={artifact.filename}>{artifact.filename}</span><small>{artifact.kind}</small>
-      </a>)}
-    </div>
-  </section>;
   return (
-    <main>
+    <main className="analysis-detail-page">
       <Link className="back-link" to="/runs">← All runs</Link>
-      <PageHeader eyebrow={run.scenario_name} title={`Run #${run.id}`} actions={<StatusTag status={run.status} />} />
+      <PageHeader eyebrow={run.scenario_name} title={`Run #${run.id}`} actions={<>
+        <StatusTag status={run.status} />
+        <Button
+          aria-label={`Open artifacts (${artifacts.length})`}
+          disabled={artifacts.length === 0}
+          icon={IconNames.FOLDER_SHARED_OPEN}
+          onClick={() => setArtifactsOpen(true)}
+          small
+        >Artifacts {artifacts.length}</Button>
+      </>} />
       <section className="property-grid run-summary-panel" aria-label="Run summary">
-        <div><span>Scenario</span><strong>{run.scenario_name}</strong></div>
-        <div><span>Repository</span><strong>{run.repository_name ?? "Legacy runner"}</strong></div>
-        <div><span>Branch</span><strong>{run.branch ?? run.build_branch ?? "—"}</strong></div>
-        <div><span>Commit</span><code title={run.commit_sha ?? undefined}>{run.commit_sha?.slice(0, 10) ?? "—"}</code></div>
-        <div><span>Build</span><strong>{run.build_id ? `#${run.build_id}` : "—"}</strong></div>
-        <div><span>Autopilot</span><strong>{run.autopilot}</strong></div>
+        <div><span>Scenario</span><strong>{run.scenario_name}</strong><Button aria-label="View scenario snapshot" icon={IconNames.EYE_OPEN} minimal onClick={() => setScenarioViewerOpen(true)} small>View Snapshot</Button></div>
+        <div><span>Runtime</span><strong className="technical-value">{run.branch ?? run.build_branch ?? "detached"} @ {run.commit_sha?.slice(0, 10) ?? "—"}</strong><small>{run.repository_name ?? "Legacy runner"}</small></div>
+        <div><span>Build</span><div className="run-build-summary">
+          <strong className="technical-value">{run.build_id ? `#${run.build_id}` : "—"}</strong>
+          {buildDetails.data && <StatusTag status={buildDetails.data.status} />}
+          {buildReused && <small>REUSED</small>}
+          {run.build_id && <Button aria-label={`View build #${run.build_id}`} icon={IconNames.EYE_OPEN} minimal onClick={() => setBuildDetailsOpen(true)} small>View</Button>}
+        </div></div>
+        <div><span>Variants</span><strong className="technical-value">{runVariants.join(" + ")}</strong></div>
+        <div><span>Controller Parameters</span><strong className="technical-value">{Object.keys(run.controller_parameters ?? {}).length || "—"}</strong><Button disabled={Object.keys(run.controller_parameters ?? {}).length === 0} icon={IconNames.EYE_OPEN} minimal onClick={() => setParametersOpen(true)} small>View</Button></div>
         <div><span>Simulation</span><strong>{run.simulation_time_sec == null ? "—" : `${run.simulation_time_sec.toFixed(2)} s`}</strong></div>
         <div><span>Wall time</span><strong>{run.wall_time_sec == null ? "—" : `${run.wall_time_sec.toFixed(2)} s`}</strong></div>
       </section>
+      <ExecutionPipeline stages={run.stages ?? []} groups={RUN_PIPELINE_GROUPS} title="Run pipeline" />
       {run.error_message && <ErrorPanel message={run.error_message} />}
       {(run.status === "queued" || run.status === "running") && <Loading label={run.status === "queued" ? "Resolving build and waiting for a worker" : "Simulation running"} />}
-      {completed && signals.loading && <Loading label="Loading telemetry" />}
-      {signals.error && <ErrorPanel message={signals.error} />}
-      {telemetry ? <section className="telemetry-workspace">
-        <div className="telemetry-primary">
-          <div className="section-heading workspace-heading"><div><span className="eyebrow">Recorded telemetry</span><h2>Flight response</h2></div><small>{telemetry.returned_points.toLocaleString()} / {telemetry.source_points.toLocaleString()} points</small></div>
-          <div className="telemetry-chart-grid">
-            <div className="chart-span-full"><TimeSeriesChart title="Roll tracking" unit="deg" group={`run-${id}`} series={[
-              { name: "Commanded", time: telemetry.time, values: telemetry.series.commanded_roll, color: "#f2bd52", dashed: true },
-              { name: "Actual", time: telemetry.time, values: telemetry.series.roll, color: "#21c8b5" },
-            ]} /></div>
-            <TimeSeriesChart title="Roll rate" unit="deg/s" group={`run-${id}`} series={[
-              { name: "Commanded", time: telemetry.time, values: telemetry.series.commanded_roll_rate, color: "#f2bd52", dashed: true },
-              { name: "Actual", time: telemetry.time, values: telemetry.series.roll_rate, color: "#5b8def" },
-            ]} />
-            <TimeSeriesChart title="Aileron" unit="deg" group={`run-${id}`} series={[
-              { name: "Aileron", time: telemetry.time, values: telemetry.series.aileron, color: "#d56ef4" },
-            ]} />
+      {completed ? <RunAnalysisView
+        dataSource={plotDataSource}
+        scenarioType={run.scenario_type}
+        heading={<div className="section-heading workspace-heading">
+          <div><span className="eyebrow">Recorded telemetry</span><h2>Analysis workspace</h2></div>
+          <div className="intra-run-view" aria-label="Telemetry view">
+            <span>View</span>
+            <ButtonGroup minimal>
+              <Button active={view === "primary"} disabled={!runVariants.includes("primary")} onClick={() => setView("primary")} small>Primary</Button>
+              <Button active={view === "baseline"} disabled={!runVariants.includes("baseline")} onClick={() => setView("baseline")} small>Baseline</Button>
+              <Button active={view === "overlay"} disabled={runVariants.length < 2} onClick={() => setView("overlay")} small>Overlay</Button>
+            </ButtonGroup>
           </div>
-        </div>
-        <aside className="telemetry-inspector" aria-label="Run inspector">{metricsPanel}{artifactsPanel}</aside>
-      </section> : <div className="detail-side-panels">{metricsPanel}{artifactsPanel}</div>}
+        </div>}
+        inspector={({ focusTimeRange, timeline, onVisibleRangeChange, onCursorTimeChange }) => <aside className="telemetry-inspector" aria-label="Run inspector">
+          {run.scenario_type === "roll_hold" && <RollHoldAnalyzerPanel
+            runId={run.id}
+            timeline={timeline}
+            onVisibleRangeChange={onVisibleRangeChange}
+            onCursorTimeChange={onCursorTimeChange}
+            onFocusRange={focusTimeRange}
+            onViewParameters={() => setParametersOpen(true)}
+          />}
+          {metricsPanel}
+        </aside>}
+      /> : <div className="detail-side-panels">{metricsPanel}</div>}
+      <ArtifactsDialog artifacts={artifacts} isOpen={artifactsOpen} onClose={() => setArtifactsOpen(false)} runId={run.id} />
+      <BuildDetailsDialog
+        build={buildDetails.data}
+        buildId={run.build_id}
+        error={buildDetails.error}
+        isOpen={buildDetailsOpen}
+        loading={buildDetails.loading}
+        onClose={() => setBuildDetailsOpen(false)}
+        reused={buildReused}
+      />
+      <ScenarioViewerDialog isOpen={scenarioViewerOpen} load={loadScenarioSnapshot} onClose={() => setScenarioViewerOpen(false)} title={`${run.scenario_name} · Executed snapshot`} />
+      <ControllerParametersDialog
+        definitions={parameterDefinitions}
+        isOpen={parametersOpen}
+        onClose={() => setParametersOpen(false)}
+        parameters={run.controller_parameters ?? {}}
+        title={`Run #${run.id} · Controller Parameters`}
+      />
     </main>
   );
 }

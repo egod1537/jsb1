@@ -7,20 +7,17 @@ import { RunsPage } from "./pages/RunsPage";
 const RunDetailPage = lazy(() =>
   import("./pages/RunDetailPage").then((module) => ({ default: module.RunDetailPage })),
 );
-const ComparePage = lazy(() =>
-  import("./pages/ComparePage").then((module) => ({ default: module.ComparePage })),
+const RunComparePage = lazy(() =>
+  import("./pages/RunComparePage").then((module) => ({ default: module.RunComparePage })),
 );
-const RepositoriesPage = lazy(() =>
-  import("./pages/RepositoriesPage").then((module) => ({ default: module.RepositoriesPage })),
-);
-const RepositoryDetailPage = lazy(() =>
-  import("./pages/RepositoryDetailPage").then((module) => ({ default: module.RepositoryDetailPage })),
+const SettingsPage = lazy(() =>
+  import("./pages/SettingsPage").then((module) => ({ default: module.SettingsPage })),
 );
 const BuildsPage = lazy(() =>
   import("./pages/BuildsPage").then((module) => ({ default: module.BuildsPage })),
 );
-const DeploymentsPage = lazy(() =>
-  import("./pages/DeploymentsPage").then((module) => ({ default: module.DeploymentsPage })),
+const ScenarioLibraryPage = lazy(() =>
+  import("./pages/ScenarioLibraryPage").then((module) => ({ default: module.ScenarioLibraryPage })),
 );
 
 export function App() {
@@ -28,12 +25,15 @@ export function App() {
     <Suspense fallback={<main><Loading label="Loading view" /></main>}>
       <Routes>
         <Route path="/runs" element={<RunsPage />} />
+        <Route path="/runs/compare" element={<RunComparePage />} />
         <Route path="/runs/:id" element={<RunDetailPage />} />
-        <Route path="/repositories" element={<RepositoriesPage />} />
-        <Route path="/repositories/:id" element={<RepositoryDetailPage />} />
+        <Route path="/repositories" element={<Navigate to="/settings" replace />} />
+        <Route path="/repositories/:id" element={<Navigate to="/settings" replace />} />
         <Route path="/builds" element={<BuildsPage />} />
-        <Route path="/deployments" element={<DeploymentsPage />} />
-        <Route path="/compare" element={<ComparePage />} />
+        <Route path="/scenarios" element={<ScenarioLibraryPage />} />
+        <Route path="/settings" element={<SettingsPage />} />
+        <Route path="/compare" element={<Navigate to="/runs" replace />} />
+        <Route path="/comparisons/:id" element={<Navigate to="/runs" replace />} />
         <Route path="*" element={<Navigate to="/runs" replace />} />
       </Routes>
     </Suspense>

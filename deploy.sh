@@ -72,6 +72,12 @@ previous_hostname="$(unit_value "$unit_dir" previous-hostname 2>/dev/null || uni
 recorded_commit="$(unit_value "$unit_dir" commit 2>/dev/null || true)"
 recorded_status="$(unit_value "$unit_dir" status 2>/dev/null || true)"
 successful_commit="$(unit_value "$unit_dir" successful-commit 2>/dev/null || true)"
+if [[ "${JSB1_AUTO_DEPLOY_REQUEST:-false}" == true \
+  && "$recorded_commit" == "$commit" && "$recorded_status" == running ]]; then
+  printf 'Automatic deployment already current: %s at %s\n' \
+    "$branch" "$short_commit"
+  exit 0
+fi
 deployment_stage="preparing deployment"
 
 deployment_cleanup() {
@@ -105,15 +111,15 @@ atomic_value "$unit_dir" branch "$branch"
 atomic_value "$unit_dir" commit "$commit"
 atomic_value "$unit_dir" hostname "$hostname"
 atomic_value "$unit_dir" status starting
-deployment_stage="GitHub deployment initialization"
-github_create_deployment \
-  "$unit_dir" "$commit" "$github_environment" "$branch" "$hostname" \
-  || die "GitHub deployment reporting is required but initialization failed"
 deployment_stage="GitHub commit status initialization"
 github_update_commit_status \
   "$unit_dir" "$commit" pending "$github_commit_context" \
   "Deploying $branch" "https://$hostname" \
   || die "GitHub commit status reporting is required but initialization failed"
+deployment_stage="GitHub deployment initialization"
+github_create_deployment \
+  "$unit_dir" "$commit" "$github_environment" "$branch" "$hostname" \
+  || die "GitHub deployment reporting is required but initialization failed"
 
 deployment_stage="preparing worktree"
 if [[ ! -e "$worktree/.git" ]]; then
@@ -143,8 +149,45 @@ if [[ -n "$DEPLOY_BUILDER" ]]; then
 else
   docker compose -p "$project" -f "$DEPLOY_COMPOSE" build
 fi
+if [[ "${JSB1_DEPLOY_RESTART_WORKER:-false}" == true && -f "$unit_dir/data/jsb1.db" ]]; then
+  deployment_stage="execution worker drain verification"
+  active_worker_jobs="$(python3 - "$unit_dir/data/jsb1.db" <<'PY'
+import sqlite3
+import sys
+
+connection = sqlite3.connect(sys.argv[1], timeout=10)
+try:
+    builds = connection.execute(
+        "SELECT COUNT(*) FROM builds WHERE status = 'running'"
+    ).fetchone()[0]
+    runs = connection.execute(
+        "SELECT COUNT(*) FROM runs WHERE status = 'running'"
+    ).fetchone()[0]
+    print(int(builds) + int(runs))
+finally:
+    connection.close()
+PY
+)"
+  [[ "$active_worker_jobs" == 0 ]] \
+    || die "execution worker has $active_worker_jobs active job(s); wait before restart"
+fi
 deployment_stage="container startup"
-docker compose -p "$project" -f "$DEPLOY_COMPOSE" up -d --force-recreate --remove-orphans --wait
+docker compose -p "$project" -f "$DEPLOY_COMPOSE" \
+  up -d --no-deps --force-recreate --wait backend
+worker_container="$(docker compose -p "$project" -f "$DEPLOY_COMPOSE" ps -aq worker)"
+if [[ -z "$worker_container" ]]; then
+  printf 'Starting independent execution worker...\n'
+  docker compose -p "$project" -f "$DEPLOY_COMPOSE" up -d --no-deps --wait worker
+elif [[ "${JSB1_DEPLOY_RESTART_WORKER:-false}" == true ]]; then
+  printf 'Explicitly restarting execution worker...\n'
+  docker compose -p "$project" -f "$DEPLOY_COMPOSE" \
+    up -d --no-deps --force-recreate --wait worker
+else
+  printf 'Preserving independent execution worker %s.\n' "$worker_container"
+  docker start "$worker_container" >/dev/null
+fi
+docker compose -p "$project" -f "$DEPLOY_COMPOSE" \
+  up -d --no-deps --force-recreate --remove-orphans --wait web
 deployment_stage="application health check"
 wait_for_http "$port"
 deployment_stage="version metadata verification"
@@ -202,6 +245,9 @@ github_update_commit_status \
   "$unit_dir" "$commit" success "$github_commit_context" \
   "Deployment successful" "https://$hostname" \
   || die "GitHub commit status reporting is required but success status failed"
+deployment_stage="GitHub commit status verification"
+github_verify_commit_status \
+  "$unit_dir" "$commit" success "$github_commit_context"
 deployment_stage="recording successful deployment"
 record_successful_commit "$unit_dir" "$commit"
 atomic_value "$unit_dir" status running

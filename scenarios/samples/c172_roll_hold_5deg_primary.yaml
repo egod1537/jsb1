@@ -1,0 +1,46 @@
+schema_version: 1
+scenario_type: roll_hold
+name: C172 Roll Hold 5deg Primary
+aircraft: c172x
+controller_parameters:
+  - FW_R_TC
+  - FW_RR_P
+  - FW_RR_I
+  - FW_RR_D
+  - FW_RR_FF
+  - FW_RR_IMAX
+
+initial_condition:
+  latitude_deg: 0
+  longitude_deg: 0
+  altitude_ft: 3000
+  airspeed_kts: 100
+  roll_deg: 0
+  pitch_deg: 0
+  heading_deg: 0
+  p_rad_s: 0
+  q_rad_s: 0
+  r_rad_s: 0
+
+environment:
+  wind_enabled: false
+
+trim:
+  enabled: true
+  mode: Full
+
+simulation:
+  duration_sec: 30
+  dt_sec: 0.01
+
+events:
+  - time_sec: 5
+    command:
+      type: roll_hold
+      roll_deg: 5
+
+acceptance:
+  settling_band_deg: 0.5
+  settling_time_limit_sec: 10
+  overshoot_limit_deg: 1.0
+  max_oscillation_cycles: 2

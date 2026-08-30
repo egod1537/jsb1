@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package jsb.telemetry.v1;
+
+// Roll-hold command, feedback, error, and normalized actuator output.
+message RollControlState {
+  uint64 sim_time_ns = 1;
+  double commanded_roll_rad = 2;
+  double commanded_roll_rate_rad_s = 3;
+  double roll_error_rad = 4;
+  double roll_rate_rad_s = 5;
+  double roll_rate_error_rad_s = 6;
+  double aileron_command = 7;
+  double roll_rad = 8;
+}

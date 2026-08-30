@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jsb0.dev/contract/v2/run.schema.json",
+  "title": "JSB0 Run Metadata v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version", "runtime", "scenario", "telemetry_schema_version",
+    "aircraft", "mode", "execution", "started_at", "ended_at",
+    "duration_s", "status"
+  ],
+  "properties": {
+    "contract_version": {"const": "2.0.0"},
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["branch", "commit", "application_version"],
+      "properties": {
+        "branch": {"type": "string", "minLength": 1},
+        "commit": {"type": "string", "pattern": "^(?:[0-9a-f]{40}|unknown)$"},
+        "application_version": {"type": "string", "minLength": 1}
+      }
+    },
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "file", "digest_sha256", "schema_version", "scenario_type"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "file": {"type": "string"},
+        "digest_sha256": {"type": "string", "pattern": "^(?:[0-9a-f]{64})?$"},
+        "schema_version": {"const": 1},
+        "scenario_type": {"const": "roll_hold"}
+      }
+    },
+    "telemetry_schema_version": {"const": 1},
+    "aircraft": {"const": "c172x"},
+    "mode": {"type": "string", "enum": ["single", "compare"]},
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "variant": {"type": "string", "enum": ["baseline", "primary"]},
+        "variants": {"type": "array", "const": ["baseline", "primary"]}
+      }
+    },
+    "autopilot": {"type": "string", "enum": ["primary", "baseline"]},
+    "results": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["baseline", "primary"],
+      "properties": {
+        "baseline": {"$ref": "#/$defs/variantResult"},
+        "primary": {"$ref": "#/$defs/variantResult"}
+      }
+    },
+    "started_at": {"type": "string", "format": "date-time"},
+    "ended_at": {"type": "string", "format": "date-time"},
+    "duration_s": {"type": "number", "minimum": 0},
+    "status": {"type": "string", "enum": ["completed", "failed", "interrupted"]},
+    "simulation_dt_s": {"type": "number", "exclusiveMinimum": 0},
+    "simulation_time_s": {"type": "number", "minimum": 0},
+    "wall_time_s": {"type": "number", "minimum": 0},
+    "realtime_factor": {"type": "number", "minimum": 0},
+    "steps": {"type": "integer", "minimum": 0},
+    "error": {"type": "string"}
+  },
+  "$defs": {
+    "variantResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": {"type": "string", "enum": ["completed", "failed", "interrupted"]},
+        "error": {"type": "string"}
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "mode": {"const": "single"},
+        "execution": {"required": ["variant"], "not": {"required": ["variants"]}}
+      },
+      "required": ["autopilot"],
+      "not": {"required": ["results"]}
+    },
+    {
+      "properties": {
+        "mode": {"const": "compare"},
+        "execution": {"required": ["variants"], "not": {"required": ["variant"]}}
+      },
+      "required": ["results"],
+      "not": {"required": ["autopilot"]}
+    }
+  ]
+}

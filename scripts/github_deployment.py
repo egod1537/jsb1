@@ -98,16 +98,19 @@ def _error_message(error: urllib.error.HTTPError) -> str:
 def api_request(
     method: str,
     path: str,
-    payload: dict[str, Any],
+    payload: dict[str, Any] | None,
     *,
     token: str,
     api_url: str,
     api_version: str,
     timeout: float = 20,
 ) -> dict[str, Any]:
+    data = None
+    if payload is not None:
+        data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     request = urllib.request.Request(
         f"{api_url.rstrip('/')}{path}",
-        data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+        data=data,
         headers={
             "Accept": "application/vnd.github+json",
             "Authorization": f"Bearer {token}",
@@ -130,6 +133,27 @@ def api_request(
     if not isinstance(result, dict):
         raise GitHubApiError("GitHub API returned an unexpected response")
     return result
+
+
+def verify_commit_status_response(
+    result: dict[str, Any], commit: str, context: str, state: str
+) -> None:
+    response_sha = result.get("sha")
+    if not isinstance(response_sha, str) or response_sha.lower() != commit.lower():
+        raise GitHubApiError("GitHub commit status response SHA did not match")
+    statuses = result.get("statuses")
+    if not isinstance(statuses, list):
+        raise GitHubApiError("GitHub commit status response did not include statuses")
+    for status in statuses:
+        if (
+            isinstance(status, dict)
+            and status.get("context") == context
+            and status.get("state") == state
+        ):
+            return
+    raise GitHubApiError(
+        f"GitHub commit status context {context!r} was not found in state {state!r}"
+    )
 
 
 def _validate_repository(repository: str) -> None:
@@ -171,6 +195,11 @@ def build_parser() -> argparse.ArgumentParser:
     commit_status.add_argument("--context", required=True)
     commit_status.add_argument("--description", required=True)
     commit_status.add_argument("--target-url")
+
+    verify_status = subparsers.add_parser("verify-status")
+    verify_status.add_argument("--commit", required=True)
+    verify_status.add_argument("--state", required=True, choices=VALID_COMMIT_STATES)
+    verify_status.add_argument("--context", required=True)
     return parser
 
 
@@ -222,6 +251,22 @@ def main(argv: list[str] | None = None) -> int:
                 token=token,
                 api_url=args.api_url,
                 api_version=args.api_version,
+            )
+            return 0
+
+        if args.command == "verify-status":
+            if not COMMIT_PATTERN.fullmatch(args.commit):
+                raise ValueError("commit must be a full 40-character SHA")
+            result = api_request(
+                "GET",
+                f"/repos/{args.repository}/commits/{args.commit}/status",
+                None,
+                token=token,
+                api_url=args.api_url,
+                api_version=args.api_version,
+            )
+            verify_commit_status_response(
+                result, args.commit, args.context, args.state
             )
             return 0
 

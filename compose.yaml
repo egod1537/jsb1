@@ -6,6 +6,7 @@ x-jsb1-logging: &jsb1-logging
 
 services:
   backend:
+    image: jsb1-backend:local
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -14,14 +15,35 @@ services:
       JSB1_DATABASE_PATH: /data/jsb1.db
       JSB_SIM_RUNNER_PATH: jsb-sim-runner
       JSB_SCENARIO_DIR: /scenarios
-      JSB1_RUNTIME_REPOSITORY_NAME: ${JSB1_RUNTIME_REPOSITORY_NAME:-jsb0}
+      JSB0_REPOSITORY_URL: ${JSB0_REPOSITORY_URL:-https://github.com/egod1537/jsb0.git}
+      JSB0_REPOSITORY_PATH: /runtime/jsb0
+      JSB0_DEFAULT_BRANCH: ${JSB0_DEFAULT_BRANCH:-impl}
+      JSB1_SCENARIO_SFTP_HOST: ${JSB1_SCENARIO_SFTP_HOST:-}
+      JSB1_SCENARIO_SFTP_PORT: ${JSB1_SCENARIO_SFTP_PORT:-22}
+      JSB1_SCENARIO_SFTP_USER: ${JSB1_SCENARIO_SFTP_USER:-}
+      JSB1_SCENARIO_SFTP_ROOT: ${JSB1_SCENARIO_SFTP_ROOT:-/}
+      JSB1_SCENARIO_SFTP_KEY_PATH: ${JSB1_SCENARIO_SFTP_KEY_PATH:+/run/secrets/jsb1-scenario-sftp-key}
+      JSB1_SCENARIO_SFTP_PASSWORD: ${JSB1_SCENARIO_SFTP_PASSWORD:-}
+      JSB1_SCENARIO_SFTP_KNOWN_HOSTS_PATH: ${JSB1_SCENARIO_SFTP_KNOWN_HOSTS_PATH:+/run/secrets/jsb1-scenario-known-hosts}
+      JSB1_SCENARIO_SFTP_TIMEOUT_SEC: ${JSB1_SCENARIO_SFTP_TIMEOUT_SEC:-15}
       JSB1_MAX_CONCURRENT_RUNS: "1"
+      JSB1_EXECUTION_MODE: external
       JSB1_RUN_TIMEOUT_SEC: "1800"
-      JSB1_AUTOPILOTS: '["baseline","primary"]'
       JSB1_CORS_ORIGINS: '["http://localhost:8081","http://127.0.0.1:8081"]'
     volumes:
       - ./data:/data
       - ./scenarios:/scenarios:ro
+      - type: bind
+        source: ${JSB0_REPOSITORY_PATH:-./data/repositories/jsb0}
+        target: /runtime/jsb0
+      - type: bind
+        source: ${JSB1_SCENARIO_SFTP_KEY_PATH:-/dev/null}
+        target: /run/secrets/jsb1-scenario-sftp-key
+        read_only: true
+      - type: bind
+        source: ${JSB1_SCENARIO_SFTP_KNOWN_HOSTS_PATH:-/dev/null}
+        target: /run/secrets/jsb1-scenario-known-hosts
+        read_only: true
     healthcheck:
       test:
         - CMD
@@ -32,6 +54,38 @@ services:
       timeout: 3s
       retries: 10
       start_period: 10s
+    logging: *jsb1-logging
+    restart: unless-stopped
+
+  worker:
+    image: jsb1-backend:local
+    command: ["python", "-m", "app.worker"]
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      JSB1_DATA_DIR: /data
+      JSB1_DATABASE_PATH: /data/jsb1.db
+      JSB_SIM_RUNNER_PATH: jsb-sim-runner
+      JSB1_REPOSITORY_ROOT: /data/repositories
+      JSB0_REPOSITORY_URL: ${JSB0_REPOSITORY_URL:-https://github.com/egod1537/jsb0.git}
+      JSB0_REPOSITORY_PATH: /runtime/jsb0
+      JSB0_DEFAULT_BRANCH: ${JSB0_DEFAULT_BRANCH:-impl}
+      JSB1_WORKTREE_ROOT: /data/worktrees
+      JSB1_BUILD_ROOT: /data/builds
+      JSB1_MAX_CONCURRENT_RUNS: "1"
+      JSB1_RUN_TIMEOUT_SEC: "1800"
+    volumes:
+      - ./data:/data
+      - type: bind
+        source: ${JSB0_REPOSITORY_PATH:-./data/repositories/jsb0}
+        target: /runtime/jsb0
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 2s
     logging: *jsb1-logging
     restart: unless-stopped
 

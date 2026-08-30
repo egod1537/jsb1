@@ -1,0 +1,44 @@
+name: Scenario Contract
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out JSB1
+        uses: actions/checkout@v7
+        with:
+          path: jsb1
+
+      - name: Check out JSB0 main contract
+        uses: actions/checkout@v7
+        with:
+          repository: egod1537/jsb0
+          ref: main
+          path: jsb0
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: jsb1/backend/pyproject.toml
+
+      - name: Install JSB1 backend dependencies
+        run: python -m pip install -e './jsb1/backend[test]'
+
+      - name: Validate bundled scenarios
+        working-directory: jsb1
+        run: >-
+          python scripts/validate-scenarios.py
+          --scenario-dir scenarios
+          --runtime-root ../jsb0

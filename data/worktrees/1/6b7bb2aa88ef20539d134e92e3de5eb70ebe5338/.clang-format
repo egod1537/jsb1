@@ -1,0 +1,9 @@
+BasedOnStyle: LLVM
+IndentWidth: 2
+ContinuationIndentWidth: 4
+ColumnLimit: 80
+AlignAfterOpenBracket: DontAlign
+AllowAllArgumentsOnNextLine: false
+BinPackArguments: false
+BreakBeforeBinaryOperators: NonAssignment
+SortIncludes: Never

@@ -33,8 +33,8 @@ service_state() {
   fi
 }
 
-printf '%-28s %-10s %-12s %-13s %-12s %-49s %-7s %-12s %-20s %-46s %s\n' \
-  BRANCH STATUS GITHUB_DEPLOY GITHUB_COMMIT STALE_FOR CONTAINERS PORT COMMIT BUILT_AT HOSTNAME WORKTREE
+printf '%-28s %-10s %-12s %-13s %-13s %-12s %-49s %-7s %-12s %-12s %-30s %-20s %-46s %s\n' \
+  BRANCH STATUS GITHUB_DEPLOY GITHUB_COMMIT GITHUB_VERIFY STALE_FOR CONTAINERS PORT COMMIT GITHUB_SHA GITHUB_CONTEXT BUILT_AT HOSTNAME WORKTREE
 found=false
 active=0
 now="$(date +%s)"
@@ -60,6 +60,9 @@ for unit_dir in "$UNITS_DIR"/*; do
       github_commit=disabled
     fi
   fi
+  github_verify="$(unit_value "$unit_dir" github-commit-status-verification 2>/dev/null || printf -- '-')"
+  github_status_sha="$(unit_value "$unit_dir" github-commit-status-commit 2>/dev/null || printf -- '-')"
+  github_context="$(unit_value "$unit_dir" github-commit-status-context 2>/dev/null || printf -- '-')"
   containers='state-only (Docker unavailable)'
   if [[ "$docker_available" == true && -n "$project" ]]; then
     backend_state="$(service_state "$project" backend)"
@@ -79,8 +82,8 @@ for unit_dir in "$UNITS_DIR"/*; do
   if [[ "$stale_since" =~ ^[0-9]+$ && "$now" -ge "$stale_since" ]]; then
     stale_for="$((now - stale_since))s"
   fi
-  printf '%-28s %-10s %-12s %-13s %-12s %-49s %-7s %-12s %-20s %-46s %s\n' \
-    "$branch" "$status" "$github" "$github_commit" "$stale_for" "$containers" "$port" "${commit:0:12}" "$built_at" "$hostname" "$worktree"
+  printf '%-28s %-10s %-12s %-13s %-13s %-12s %-49s %-7s %-12s %-12s %-30s %-20s %-46s %s\n' \
+    "$branch" "$status" "$github" "$github_commit" "$github_verify" "$stale_for" "$containers" "$port" "${commit:0:12}" "${github_status_sha:0:12}" "$github_context" "$built_at" "$hostname" "$worktree"
 done
 if [[ "$found" == false ]]; then
   printf '(no deployments)\n'

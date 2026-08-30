@@ -39,7 +39,8 @@ list_remote_heads() {
 }
 
 deploy_remote_revision() {
-  "$SCRIPT_DIR/deploy.sh" "$1" --revision "$2"
+  JSB1_AUTO_DEPLOY_REQUEST=true \
+    "$SCRIPT_DIR/deploy.sh" "$1" --revision "$2"
 }
 
 undeploy_stale_branch() {
@@ -193,7 +194,7 @@ install_watcher() {
   init_state
   mkdir -p "$AUTO_LOG_DIR"
 
-  local current_crontab="" next_crontab="" cron_command auto_main retry_seconds stale_grace builder_assignment grep_status
+  local current_crontab="" next_crontab="" cron_command auto_main retry_seconds stale_grace builder_assignment grep_status deploy_env_file_quoted
   auto_main="${JSB1_AUTO_DEPLOY_MAIN:-false}"
   retry_seconds="${JSB1_AUTO_DEPLOY_RETRY_SEC:-300}"
   stale_grace="${JSB1_STALE_BRANCH_GRACE_SEC:-86400}"
@@ -206,6 +207,7 @@ install_watcher() {
     [[ "$DEPLOY_BUILDER" =~ ^[A-Za-z0-9_.-]+$ ]] || die "invalid JSB1_DEPLOY_BUILDER name"
     builder_assignment=" JSB1_DEPLOY_BUILDER=$DEPLOY_BUILDER"
   fi
+  printf -v deploy_env_file_quoted '%q' "$DEPLOY_ENV_FILE"
   current_crontab="$(mktemp "${TMPDIR:-/tmp}/jsb1-current-crontab.XXXXXX")" \
     || die "could not create temporary current crontab file"
   if ! next_crontab="$(mktemp "${TMPDIR:-/tmp}/jsb1-next-crontab.XXXXXX")"; then
@@ -219,7 +221,7 @@ install_watcher() {
     cleanup_crontab_files "$current_crontab" "$next_crontab"
     die "could not filter the existing crontab"
   fi
-  cron_command="* * * * * HOME=$HOME PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin JSB1_AUTO_DEPLOY_MAIN=$auto_main JSB1_AUTO_DEPLOY_RETRY_SEC=$retry_seconds JSB1_STALE_BRANCH_GRACE_SEC=$stale_grace$builder_assignment /bin/bash $SCRIPT_DIR/auto-deploy.sh --once >> $AUTO_LOG_FILE 2>&1 $AUTO_CRON_TAG"
+  cron_command="* * * * * HOME=$HOME PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin JSB1_DEPLOY_ENV_FILE=$deploy_env_file_quoted JSB1_AUTO_DEPLOY_MAIN=$auto_main JSB1_AUTO_DEPLOY_RETRY_SEC=$retry_seconds JSB1_STALE_BRANCH_GRACE_SEC=$stale_grace$builder_assignment /bin/bash $SCRIPT_DIR/auto-deploy.sh --once >> $AUTO_LOG_FILE 2>&1 $AUTO_CRON_TAG"
   if ! printf '%s\n' "$cron_command" >>"$next_crontab"; then
     cleanup_crontab_files "$current_crontab" "$next_crontab"
     die "could not write the automatic deployment cron entry"
@@ -251,6 +253,26 @@ show_status() {
     printf 'Automatic main deployment: enabled\n'
   else
     printf 'Automatic main deployment: disabled\n'
+  fi
+  case "$DEPLOY_ENV_STATUS" in
+    configured)
+      if [[ "$DEPLOY_ENV_PERMISSION_WARNING" == true ]]; then
+        printf 'Deployment environment: configured (permission warning)\n'
+      else
+        printf 'Deployment environment: configured\n'
+      fi
+      ;;
+    missing)
+      printf 'Deployment environment: not configured\n'
+      ;;
+    *)
+      printf 'Deployment environment: unavailable (%s)\n' "$DEPLOY_ENV_STATUS"
+      ;;
+  esac
+  if github_auth_token >/dev/null; then
+    printf 'GitHub reporting credential: configured\n'
+  else
+    printf 'GitHub reporting credential: not configured\n'
   fi
   printf 'Log: %s\n' "$AUTO_LOG_FILE"
   if [[ -f "$AUTO_LOG_FILE" ]]; then

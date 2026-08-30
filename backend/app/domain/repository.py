@@ -39,6 +39,22 @@ class RepositoryStatus(Repository):
     status: str = "ready"
 
 
+class RuntimeRepositoryStatus(BaseModel):
+    id: int
+    key: str = "jsb0"
+    display_name: str
+    remote_url: str
+    local_path: str
+    default_branch: str
+    last_fetched_at: datetime | None = None
+    current_branch: str | None = None
+    head_commit: str = ""
+    dirty: bool = False
+    status: str
+    error: str | None = None
+    configuration_source: str = "platform"
+
+
 class Branch(BaseModel):
     name: str
     commit_sha: str

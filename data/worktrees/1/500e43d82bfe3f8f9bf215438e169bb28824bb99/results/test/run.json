@@ -1,0 +1,12 @@
+{
+  "scenario": "C172 Roll Hold 5deg",
+  "status": "completed",
+  "autopilot": "primary",
+  "aircraft": "c172x",
+  "dt_sec": 0.033333333333333333,
+  "duration_sec": 30,
+  "simulation_time_sec": 30.00000000000065,
+  "wall_time_sec": 0.40824349999999998,
+  "realtime_factor": 73.485554577110605,
+  "steps": 900
+}

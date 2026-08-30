@@ -32,7 +32,7 @@ def list_repositories(
     return manager.list_status()
 
 
-@router.post("", response_model=RepositoryStatus, status_code=201)
+@router.post("", response_model=RepositoryStatus, status_code=201, deprecated=True)
 def create_repository(
     body: RepositoryCreate,
     manager: Annotated[RepositoryManager, Depends(get_repository_manager)],
@@ -54,7 +54,7 @@ def repository_detail(
         raise _not_found_or_invalid(exc) from exc
 
 
-@router.delete("/{repository_id}", status_code=204)
+@router.delete("/{repository_id}", status_code=204, deprecated=True)
 def delete_repository(
     repository_id: int,
     manager: Annotated[RepositoryManager, Depends(get_repository_manager)],

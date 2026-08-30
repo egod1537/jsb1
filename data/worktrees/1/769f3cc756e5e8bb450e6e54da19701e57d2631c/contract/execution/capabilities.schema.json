@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jsb0.dev/contract/v2/execution-capabilities.schema.json",
+  "title": "JSB0 Headless Execution Capabilities",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["modes", "variants", "compare_variants"],
+  "properties": {
+    "modes": {"type": "array", "const": ["single", "compare"]},
+    "variants": {"type": "array", "const": ["baseline", "primary"]},
+    "compare_variants": {"type": "array", "const": ["baseline", "primary"]}
+  }
+}

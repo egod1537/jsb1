@@ -5,6 +5,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.domain.pipeline import PipelineStage
+
 
 class BuildStatus(StrEnum):
     QUEUED = "queued"
@@ -37,6 +39,8 @@ class Build(BaseModel):
     completed_at: datetime | None = None
     error_message: str | None = None
     reused: bool = False
+    current_stage: str | None = None
+    stages: list[PipelineStage] = Field(default_factory=list)
 
 
 class InstanceStatus(StrEnum):

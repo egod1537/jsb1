@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import os
-import subprocess
-import threading
 import re
+import threading
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit
 
 from app.domain.repository import (
     Branch,
@@ -12,20 +11,32 @@ from app.domain.repository import (
     RepositoryCreate,
     RepositoryStatus,
     Revision,
+    RuntimeRepositoryStatus,
 )
-from app.repositories.jsb_repository_repository import JsbRepositoryRepository
+from app.repositories.jsb_repository_repository import (
+    JsbRepositoryRepository,
+    RepositoryConflict,
+)
+from app.infrastructure.git import (
+    GitOperationError,
+    GitRepositoryAdapter,
+    WorktreeManager,
+)
 
 
 class InvalidRepositoryPath(ValueError):
     pass
 
 
-class GitOperationError(RuntimeError):
-    pass
-
-
 class RuntimeRepositoryNotConfigured(RuntimeError):
     pass
+
+
+class RuntimeRepositoryUnavailable(RuntimeError):
+    pass
+
+
+RUNTIME_REPOSITORY_KEY = "jsb0"
 
 
 class RepositoryManager:
@@ -34,14 +45,168 @@ class RepositoryManager:
         repository: JsbRepositoryRepository,
         repository_root: Path,
         worktree_root: Path,
+        git: GitRepositoryAdapter | None = None,
     ) -> None:
         self.repository = repository
         self.repository_root = repository_root.resolve()
         self.worktree_root = worktree_root.resolve()
+        self.git = git or GitRepositoryAdapter()
         self.repository_root.mkdir(parents=True, exist_ok=True)
         self.worktree_root.mkdir(parents=True, exist_ok=True)
-        self._locks_guard = threading.Lock()
-        self._locks: dict[int, threading.Lock] = {}
+        self.worktrees = WorktreeManager(self.worktree_root, self.git)
+        self._runtime_repository_id: int | None = None
+        self._runtime_error: str | None = None
+        self._runtime_warning: str | None = None
+        self._fetch_locks_guard = threading.Lock()
+        self._fetch_locks: dict[int, threading.Lock] = {}
+
+    def ensure_runtime_repository(
+        self, remote_url: str, source_path: Path, default_branch: str
+    ) -> RuntimeRepositoryStatus:
+        """Bootstrap or reconcile the one operator-configured JSB0 Runtime clone."""
+        normalized_url = self.normalize_remote_url(remote_url)
+        self._validate_remote_url(normalized_url)
+        self.validate_branch_name(default_branch)
+        resolved_source = source_path.expanduser().resolve()
+        if resolved_source in {Path("/"), self.repository_root}:
+            raise InvalidRepositoryPath(
+                "JSB0_REPOSITORY_PATH must identify a dedicated repository directory"
+            )
+        stored_path = self._stored_path(resolved_source)
+        record = self._matching_runtime_record(normalized_url, resolved_source)
+        same_existing_path = False
+        if record is not None:
+            try:
+                same_existing_path = self.path_for(record) == resolved_source
+            except InvalidRepositoryPath:
+                pass
+        if record is None:
+            record = self.repository.create(
+                name=RUNTIME_REPOSITORY_KEY,
+                remote_url=normalized_url,
+                local_path=stored_path,
+                default_branch=default_branch,
+            )
+        elif (
+            record.remote_url != normalized_url
+            or record.local_path != stored_path
+            or record.default_branch != default_branch
+        ):
+            record = self.repository.update_configuration(
+                record.id,
+                remote_url=normalized_url,
+                local_path=stored_path,
+                default_branch=default_branch,
+            )
+        self._runtime_repository_id = record.id
+        self._runtime_error = None
+        self._runtime_warning = None
+        try:
+            clone_required = not resolved_source.exists()
+            if resolved_source.exists():
+                if not resolved_source.is_dir():
+                    raise InvalidRepositoryPath(
+                        "JSB0_REPOSITORY_PATH is not a directory"
+                    )
+                clone_required = not any(resolved_source.iterdir())
+                if not clone_required:
+                    self._verify_repository(resolved_source)
+            if clone_required:
+                resolved_source.parent.mkdir(parents=True, exist_ok=True)
+                self._run(
+                    [
+                        "git",
+                        "clone",
+                        "--origin",
+                        "origin",
+                        "--",
+                        normalized_url,
+                        str(resolved_source),
+                    ],
+                    operation="clone JSB0 Runtime repository",
+                    cwd=resolved_source.parent,
+                    timeout=300,
+                )
+            origin = self._optional_git(
+                resolved_source, ["remote", "get-url", "origin"]
+            )
+            if not origin:
+                self._git(
+                    resolved_source,
+                    ["remote", "add", "origin", normalized_url],
+                    operation="configure JSB0 origin",
+                )
+            elif self.normalize_remote_url(origin) != normalized_url:
+                if not same_existing_path:
+                    raise InvalidRepositoryPath(
+                        "existing repository origin does not match JSB0_REPOSITORY_URL"
+                    )
+                self._git(
+                    resolved_source,
+                    ["remote", "set-url", "origin", normalized_url],
+                    operation="update JSB0 origin",
+                )
+            self._refresh_default_branch_warning(record)
+        except (GitOperationError, InvalidRepositoryPath, OSError) as exc:
+            self._runtime_error = str(exc)
+        return self.runtime_status()
+
+    def record_runtime_configuration_error(self, error: Exception) -> None:
+        """Keep startup configuration failures visible through the runtime API."""
+        self._runtime_error = str(error)
+
+    def runtime_status(self) -> RuntimeRepositoryStatus:
+        record = self._runtime_record()
+        error = self._runtime_error
+        try:
+            status = self.status(record.id)
+            if error is None:
+                return self._runtime_public_status(status, self._runtime_warning)
+        except (GitOperationError, InvalidRepositoryPath, OSError) as exc:
+            error = error or str(exc)
+        return RuntimeRepositoryStatus(
+            id=record.id,
+            display_name=self._display_name(record.remote_url),
+            remote_url=record.remote_url,
+            local_path=str(self.path_for(record)),
+            default_branch=record.default_branch,
+            last_fetched_at=record.last_fetched_at,
+            status="error",
+            error=error or "JSB0 Runtime repository is unavailable",
+        )
+
+    def runtime_repository(self) -> RepositoryStatus:
+        record = self._runtime_record()
+        try:
+            status = self.status(record.id)
+        except (GitOperationError, InvalidRepositoryPath, OSError) as exc:
+            self._runtime_error = str(exc)
+            raise RuntimeRepositoryUnavailable(
+                "JSB0 Runtime repository is unavailable"
+            ) from exc
+        self._runtime_error = None
+        return status
+
+    def fetch_runtime_repository(self) -> RuntimeRepositoryStatus:
+        record = self._runtime_record()
+        try:
+            self.fetch(record.id)
+            self._runtime_error = None
+            self._refresh_default_branch_warning(record)
+        except (KeyError, GitOperationError, InvalidRepositoryPath, OSError) as exc:
+            self._runtime_error = str(exc)
+            raise RuntimeRepositoryUnavailable(
+                "Could not fetch JSB0 Runtime repository"
+            ) from exc
+        return self.runtime_status()
+
+    def runtime_branches(self) -> list[Branch]:
+        repository = self.runtime_repository()
+        branches: dict[str, Branch] = {}
+        for branch in self.branches(repository.id):
+            if branch.remote or branch.name not in branches:
+                branches[branch.name] = branch
+        return sorted(branches.values(), key=lambda item: item.name.lower())
 
     def register(self, request: RepositoryCreate) -> RepositoryStatus:
         source = self._source_path(request.local_path)
@@ -70,6 +235,14 @@ class RepositoryManager:
 
     def delete(self, repository_id: int) -> None:
         # Metadata deletion never removes a source checkout or experiment artifact.
+        record = self.repository.get(repository_id)
+        if (
+            record.name.lower() == RUNTIME_REPOSITORY_KEY
+            or repository_id == self._runtime_repository_id
+        ):
+            raise RepositoryConflict(
+                "the configured JSB0 Runtime repository cannot be deleted"
+            )
         self.repository.delete(repository_id)
 
     def status(self, repository_id: int) -> RepositoryStatus:
@@ -103,22 +276,20 @@ class RepositoryManager:
                 )
         return result
 
-    def runtime_repository(self, configured_name: str) -> RepositoryStatus:
-        """Return the single platform-configured JSB0 Runtime repository."""
-        try:
-            record = self.repository.get_by_name(configured_name)
-        except KeyError as exc:
-            raise RuntimeRepositoryNotConfigured(
-                "JSB0 Runtime repository is not configured"
-            ) from exc
-        return self.status(record.id)
-
     def fetch(self, repository_id: int) -> RepositoryStatus:
-        record = self.repository.get(repository_id)
-        source = self.path_for(record)
-        self._git(source, ["fetch", "--all", "--prune"], operation="fetch", timeout=300)
-        self.repository.mark_fetched(repository_id)
-        return self.status(repository_id)
+        with self._fetch_lock_for(repository_id):
+            record = self.repository.get(repository_id)
+            source = self.path_for(record)
+            origin = self._optional_git(source, ["remote", "get-url", "origin"])
+            arguments = [
+                "fetch",
+                "--prune",
+                "origin",
+                "+refs/heads/*:refs/remotes/origin/*",
+            ] if origin else ["fetch", "--all", "--prune"]
+            self._git(source, arguments, operation="fetch", timeout=300)
+            self.repository.mark_fetched(repository_id)
+            return self.status(repository_id)
 
     def branches(self, repository_id: int) -> list[Branch]:
         record = self.repository.get(repository_id)
@@ -203,36 +374,120 @@ class RepositoryManager:
         record = self.repository.get(repository_id)
         source = self.path_for(record)
         resolved = self.revision(repository_id, commit_sha).commit_sha
-        destination = self._under(
-            self.worktree_root, self.worktree_root / str(repository_id) / resolved
-        )
-        lock = self._lock_for(repository_id)
-        with lock:
-            if destination.exists():
-                existing = self._git(
-                    destination, ["rev-parse", "HEAD"], operation="inspect worktree"
-                )
-                if existing != resolved:
-                    raise GitOperationError("existing worktree points to a different commit")
-                return destination
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            self._git(source, ["worktree", "prune"], operation="prune worktrees")
-            self._git(
-                source,
-                ["worktree", "add", "--detach", str(destination), resolved],
-                operation="create worktree",
-                timeout=300,
-            )
-        return destination
+        return self.worktrees.prepare(repository_id, source, resolved)
 
     def path_for(self, repository: Repository) -> Path:
         return self._source_path(repository.local_path)
 
-    def _source_path(self, relative: str) -> Path:
-        candidate = PurePosixPath(relative)
-        if candidate.is_absolute() or not candidate.parts or ".." in candidate.parts:
-            raise InvalidRepositoryPath("local_path must be relative to repository root")
+    def _source_path(self, configured: str) -> Path:
+        filesystem_path = Path(configured).expanduser()
+        if filesystem_path.is_absolute():
+            resolved = filesystem_path.resolve()
+            if resolved == Path("/"):
+                raise InvalidRepositoryPath("repository path cannot be filesystem root")
+            return resolved
+        candidate = PurePosixPath(configured)
+        if not candidate.parts or ".." in candidate.parts:
+            raise InvalidRepositoryPath("local_path must not escape repository root")
         return self._under(self.repository_root, self.repository_root.joinpath(*candidate.parts))
+
+    def _stored_path(self, source: Path) -> str:
+        try:
+            return source.relative_to(self.repository_root).as_posix()
+        except ValueError:
+            return str(source)
+
+    def _matching_runtime_record(
+        self, normalized_url: str, source_path: Path
+    ) -> Repository | None:
+        records = self.repository.list()
+        named = next(
+            (
+                record
+                for record in records
+                if record.name.lower() == RUNTIME_REPOSITORY_KEY
+            ),
+            None,
+        )
+        if named is not None:
+            return named
+        for record in records:
+            try:
+                same_path = self.path_for(record) == source_path
+            except InvalidRepositoryPath:
+                same_path = False
+            if same_path or self.normalize_remote_url(record.remote_url) == normalized_url:
+                return record
+        return None
+
+    def _fetch_lock_for(self, repository_id: int) -> threading.Lock:
+        with self._fetch_locks_guard:
+            return self._fetch_locks.setdefault(repository_id, threading.Lock())
+
+    def _runtime_record(self) -> Repository:
+        if self._runtime_repository_id is not None:
+            try:
+                return self.repository.get(self._runtime_repository_id)
+            except KeyError:
+                self._runtime_repository_id = None
+        try:
+            record = self.repository.get_by_name(RUNTIME_REPOSITORY_KEY)
+        except KeyError as exc:
+            if self._runtime_error:
+                raise RuntimeRepositoryUnavailable(self._runtime_error) from exc
+            raise RuntimeRepositoryNotConfigured(
+                "JSB0 Runtime repository is not configured"
+            ) from exc
+        self._runtime_repository_id = record.id
+        return record
+
+    def _refresh_default_branch_warning(self, record: Repository) -> None:
+        self._runtime_warning = None
+        if record.default_branch not in {
+            branch.name for branch in self.branches(record.id)
+        }:
+            self._runtime_warning = (
+                f"Configured default branch is unavailable: {record.default_branch}"
+            )
+
+    def _runtime_public_status(
+        self, status: RepositoryStatus, error: str | None
+    ) -> RuntimeRepositoryStatus:
+        return RuntimeRepositoryStatus(
+            id=status.id,
+            display_name=self._display_name(status.remote_url),
+            remote_url=status.remote_url,
+            local_path=str(self.path_for(status)),
+            default_branch=status.default_branch,
+            last_fetched_at=status.last_fetched_at,
+            current_branch=status.current_branch,
+            head_commit=status.head_commit,
+            dirty=status.dirty,
+            status="error" if self._runtime_error else "warning" if error else status.status,
+            error=error,
+        )
+
+    @staticmethod
+    def normalize_remote_url(value: str) -> str:
+        cleaned = value.strip().rstrip("/")
+        github = re.fullmatch(
+            r"(?:https?://github\.com/|ssh://git@github\.com/|git@github\.com:)"
+            r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        if github:
+            owner, repository = github.groups()
+            return f"https://github.com/{owner}/{repository}.git"
+        return cleaned
+
+    @classmethod
+    def _display_name(cls, remote_url: str) -> str:
+        normalized = cls.normalize_remote_url(remote_url)
+        github = re.fullmatch(
+            r"https://github\.com/([^/]+)/([^/]+?)(?:\.git)?", normalized
+        )
+        return f"{github.group(1)}/{github.group(2)}" if github else RUNTIME_REPOSITORY_KEY
 
     @staticmethod
     def _under(root: Path, candidate: Path) -> Path:
@@ -250,7 +505,12 @@ class RepositoryManager:
 
     @staticmethod
     def _validate_remote_url(value: str) -> None:
-        safe_scheme = value.startswith(("https://", "http://", "ssh://", "git://"))
+        parsed = urlsplit(value)
+        safe_scheme = (
+            parsed.scheme in {"https", "http", "ssh", "git"}
+            and bool(parsed.hostname)
+            and bool(parsed.path.strip("/"))
+        )
         safe_scp = re.fullmatch(
             r"[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[A-Za-z0-9._/~+-]+(?:/[A-Za-z0-9._~+-]+)*",
             value,
@@ -279,44 +539,19 @@ class RepositoryManager:
         operation: str,
         timeout: float = 60,
     ) -> str:
-        return self._run(
-            ["git", "-C", str(source), *args], operation=operation, timeout=timeout
-        )
+        return self.git.git(source, args, operation=operation, timeout=timeout)
 
     def _optional_git(self, source: Path, args: list[str]) -> str:
-        try:
-            return self._git(source, args, operation="read repository state")
-        except GitOperationError:
-            return ""
+        return self.git.optional(source, args)
 
-    @staticmethod
     def _run(
+        self,
         command: list[str],
         *,
         operation: str,
         cwd: Path | None = None,
         timeout: float,
     ) -> str:
-        environment = os.environ.copy()
-        environment["GIT_TERMINAL_PROMPT"] = "0"
-        try:
-            result = subprocess.run(
-                command,
-                cwd=cwd,
-                env=environment,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise GitOperationError(f"git {operation} could not be completed") from exc
-        if result.returncode != 0:
-            detail = result.stderr.strip().splitlines()
-            suffix = f": {detail[-1][:500]}" if detail else ""
-            raise GitOperationError(f"git {operation} failed{suffix}")
-        return result.stdout.strip()
-
-    def _lock_for(self, repository_id: int) -> threading.Lock:
-        with self._locks_guard:
-            return self._locks.setdefault(repository_id, threading.Lock())
+        return self.git.run(
+            command, operation=operation, cwd=cwd, timeout=timeout
+        )

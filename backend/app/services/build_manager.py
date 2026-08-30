@@ -9,7 +9,13 @@ from app.domain.build import Build, BuildStatus
 from app.repositories.builds import BuildRepository
 from app.repositories.runs import utc_now
 from app.domain.repository import Revision
+from app.domain.runtime import BuildKey
+from app.infrastructure.build import CmakeBuildAdapter
 from app.services.repository_manager import InvalidRepositoryPath, RepositoryManager
+from app.services.execution_pipeline import (
+    BUILD_PIPELINE,
+    ExecutionPipelineRecorder,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -25,6 +31,7 @@ class BuildManager:
         executable_relative_path: Path,
         build_jobs: int,
         timeout_sec: float,
+        builder: CmakeBuildAdapter | None = None,
     ) -> None:
         self.repository = repository
         self.repositories = repositories
@@ -37,6 +44,9 @@ class BuildManager:
         self.executable_relative_path = executable_relative_path
         self.build_jobs = build_jobs
         self.timeout_sec = timeout_sec
+        self.builder = builder or CmakeBuildAdapter(
+            jobs=build_jobs, timeout_sec=timeout_sec
+        )
 
     def request(
         self, repository_id: int, revision: str, *, rebuild: bool = False
@@ -47,38 +57,81 @@ class BuildManager:
     def request_resolved(
         self, resolved: Revision, *, rebuild: bool = False
     ) -> tuple[Build, bool]:
-        repository_id = resolved.repository_id
-        if not rebuild:
-            cached = self.repository.find_completed(repository_id, resolved.commit_sha)
-            if cached and cached.executable_path:
-                executable = self._under(self.build_root, Path(cached.executable_path))
-                if executable.is_file():
-                    return cached.model_copy(update={"reused": True}), True
-        build = self.repository.create(
-            repository_id=repository_id,
-            commit_sha=resolved.commit_sha,
+        key = BuildKey(resolved.repository_id, resolved.commit_sha)
+        build, reused = self.repository.reserve(
+            repository_id=key.repository_id,
+            commit_sha=key.commit_sha,
             branch=resolved.branch,
-            build_dir="",
-            stdout_path="",
-            stderr_path="",
+            rebuild=rebuild,
+            paths_for_id=self._paths_for_id,
         )
-        directory = self._under(self.build_root, self.build_root / f"{build.id:06d}")
-        build = self.repository.set_paths(
-            build.id,
-            build_dir=str(directory),
-            stdout_path=str(directory / "stdout.log"),
-            stderr_path=str(directory / "stderr.log"),
+        build = self._ensure_pipeline(build, reused=reused)
+        if reused and build.status is BuildStatus.COMPLETED:
+            if build.executable_path:
+                executable = self._under(
+                    self.build_root, Path(build.executable_path)
+                )
+                if executable.is_file():
+                    return build.model_copy(update={"reused": True}), True
+            # A completed DB row without its immutable executable is not a
+            # usable cache entry. Reserve a replacement while still sharing
+            # any active replacement another caller may have started.
+            build, reused = self.repository.reserve(
+                repository_id=key.repository_id,
+                commit_sha=key.commit_sha,
+                branch=resolved.branch,
+                rebuild=True,
+                paths_for_id=self._paths_for_id,
+            )
+            build = self._ensure_pipeline(build, reused=reused)
+        return self.repository.get(build.id).model_copy(update={"reused": reused}), reused
+
+    def _ensure_pipeline(self, build: Build, *, reused: bool) -> Build:
+        recorder = ExecutionPipelineRecorder(
+            self.repository, build.id, BUILD_PIPELINE
         )
-        return build, False
+        was_empty = not build.stages
+        recorder.initialize()
+        if not was_empty:
+            return self.repository.get(build.id)
+        if build.status is BuildStatus.COMPLETED:
+            for stage_id, _ in BUILD_PIPELINE:
+                recorder.success(stage_id, "Recovered completed build history")
+        elif build.status is BuildStatus.FAILED:
+            recorder.failed(
+                "fetch_repository",
+                build.error_message or "Build failed before stage history was available",
+            )
+        else:
+            recorder.success(
+                "fetch_repository",
+                "Immutable repository revision resolved"
+                if not reused
+                else "Shared immutable build reservation",
+            )
+        return self.repository.get(build.id)
+
+    def _paths_for_id(self, build_id: int) -> tuple[str, str, str]:
+        directory = self._under(
+            self.build_root, self.build_root / f"{build_id:06d}"
+        )
+        return (
+            str(directory),
+            str(directory / "stdout.log"),
+            str(directory / "stderr.log"),
+        )
 
     def require_runnable(self, build_id: int) -> tuple[Build, Path]:
         build = self.repository.get(build_id)
         if build.status is not BuildStatus.COMPLETED or not build.executable_path:
-            raise RuntimeError("selected build is not completed")
+            detail = f": {build.error_message}" if build.error_message else ""
+            raise RuntimeError(
+                f"build #{build.id} is {build.status.value}{detail}"
+            )
         build_dir = self._under(self.build_root, Path(build.build_dir))
         executable = self._under(build_dir, Path(build.executable_path))
         if not executable.is_file() or not os.access(executable, os.X_OK):
-            raise RuntimeError("selected build executable is unavailable")
+            raise FileNotFoundError("selected build executable is missing")
         return build, executable
 
     def log_path(self, build_id: int, stream: str) -> Path:
@@ -94,6 +147,10 @@ class BuildManager:
 
     async def execute(self, build_id: int) -> None:
         build = self.repository.get(build_id)
+        pipeline = ExecutionPipelineRecorder(
+            self.repository, build_id, BUILD_PIPELINE
+        )
+        pipeline.initialize()
         try:
             self.repository.transition(
                 build_id,
@@ -101,27 +158,41 @@ class BuildManager:
                 status=BuildStatus.RUNNING,
                 started_at=utc_now(),
             )
+            if next(
+                (stage.status.value for stage in self.repository.get(build_id).stages if stage.id == "fetch_repository"),
+                "pending",
+            ) == "pending":
+                pipeline.success(
+                    "fetch_repository", "Immutable repository revision available"
+                )
+            pipeline.running("prepare_worktree")
             worktree = await asyncio.to_thread(
                 self.repositories.prepare_worktree,
                 build.repository_id,
                 build.commit_sha,
             )
+            pipeline.success("prepare_worktree")
             build_dir = self._under(self.build_root, Path(build.build_dir))
             build_dir.mkdir(parents=True, exist_ok=True)
             stdout_path = self._under(self.build_root, Path(build.stdout_path))
             stderr_path = self._under(self.build_root, Path(build.stderr_path))
             stdout_path.write_bytes(b"")
             stderr_path.write_bytes(b"")
-            await self._command(
-                ["cmake", "-S", str(worktree), "-B", str(build_dir)],
-                stdout_path,
-                stderr_path,
-            )
-            await self._command(
-                ["cmake", "--build", str(build_dir), "-j", str(self.build_jobs)],
-                stdout_path,
-                stderr_path,
-            )
+            configure = getattr(self.builder, "configure", None)
+            compile_build = getattr(self.builder, "compile", None)
+            if configure is not None and compile_build is not None:
+                pipeline.running("configure")
+                await configure(worktree, build_dir, stdout_path, stderr_path)
+                pipeline.success("configure")
+                pipeline.running("compile")
+                await compile_build(build_dir, stdout_path, stderr_path)
+                pipeline.success("compile")
+            else:
+                pipeline.running("configure", "Builder performs configure and compile together")
+                await self.builder.build(worktree, build_dir, stdout_path, stderr_path)
+                pipeline.success("configure")
+                pipeline.success("compile", "Completed by combined builder")
+            pipeline.running("verify_artifact")
             executable = self._under(
                 build_dir, build_dir / self.executable_relative_path
             )
@@ -131,6 +202,8 @@ class BuildManager:
                 )
             if not os.access(executable, os.X_OK):
                 raise PermissionError("build output is not executable")
+            pipeline.success("verify_artifact")
+            pipeline.running("complete")
             self.repository.transition(
                 build_id,
                 expected=[BuildStatus.RUNNING],
@@ -139,43 +212,15 @@ class BuildManager:
                 completed_at=utc_now(),
                 error_message=None,
             )
+            pipeline.success("complete")
         except asyncio.CancelledError:
-            self._fail(build_id, "backend stopped while build was active")
+            pipeline.fail_current("execution worker stopped while build was active")
+            self._fail(build_id, "execution worker stopped while build was active")
             raise
         except Exception as exc:
             logger.exception("build failed id=%s", build_id)
+            pipeline.fail_current(str(exc))
             self._fail(build_id, str(exc))
-
-    async def _command(
-        self, command: list[str], stdout_path: Path, stderr_path: Path
-    ) -> None:
-        logger.info("starting build command=%r", command)
-        with stdout_path.open("ab") as stdout, stderr_path.open("ab") as stderr:
-            process = await asyncio.create_subprocess_exec(
-                *command, stdout=stdout, stderr=stderr, env=os.environ.copy()
-            )
-            try:
-                await asyncio.wait_for(process.wait(), timeout=self.timeout_sec)
-            except TimeoutError as exc:
-                process.terminate()
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=5)
-                except TimeoutError:
-                    process.kill()
-                    await process.wait()
-                raise TimeoutError(
-                    f"build command exceeded timeout of {self.timeout_sec:g} seconds"
-                ) from exc
-            except asyncio.CancelledError:
-                process.terminate()
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=5)
-                except TimeoutError:
-                    process.kill()
-                    await process.wait()
-                raise
-        if process.returncode != 0:
-            raise RuntimeError(f"build command exited with code {process.returncode}")
 
     def _fail(self, build_id: int, message: str) -> None:
         try:

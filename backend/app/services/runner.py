@@ -33,9 +33,9 @@ class SimulationRunner(Protocol):
         *,
         scenario_path: Path,
         output_directory: Path,
-        autopilot: str,
         log_path: Path,
         executable_path: Path | None = None,
+        parameters_path: Path | None = None,
         on_started: Callable[[int], None] | None = None,
     ) -> RunnerResult: ...
 
@@ -55,9 +55,9 @@ class ExternalSimulationRunner:
         *,
         scenario_path: Path,
         output_directory: Path,
-        autopilot: str,
         log_path: Path,
         executable_path: Path | None = None,
+        parameters_path: Path | None = None,
         on_started: Callable[[int], None] | None = None,
     ) -> RunnerResult:
         executable = executable_path or self.executable
@@ -69,9 +69,17 @@ class ExternalSimulationRunner:
             str(scenario_path),
             "--output",
             str(output_directory),
-            "--autopilot",
-            autopilot,
         ]
+        if parameters_path is not None:
+            if not parameters_path.is_file():
+                raise RunnerUnavailable(
+                    f"controller parameter file not found: {parameters_path}"
+                )
+            expected_path = output_directory / "parameters.yaml"
+            if parameters_path.resolve() != expected_path.resolve():
+                raise RunnerUnavailable(
+                    "controller parameter file must be output/parameters.yaml"
+                )
         logger.info("starting simulation command=%r", command)
         started = time.perf_counter()
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -81,6 +89,7 @@ class ExternalSimulationRunner:
                 stdout=log_file,
                 stderr=asyncio.subprocess.STDOUT,
                 env=os.environ.copy(),
+                cwd=executable.resolve().parent if executable_path is not None else None,
             )
             if on_started is not None:
                 try:

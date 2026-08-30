@@ -26,13 +26,36 @@ interface NavigationItem {
   icon: IconName;
 }
 
-const navigation: NavigationItem[] = [
-  { label: "Runs", path: "/runs", icon: IconNames.AIRPLANE },
-  { label: "Repositories", path: "/repositories", icon: IconNames.GIT_REPO },
-  { label: "Builds", path: "/builds", icon: IconNames.BUILD },
-  { label: "Deployments", path: "/deployments", icon: IconNames.CLOUD_SERVER },
-  { label: "Compare", path: "/compare", icon: IconNames.COMPARISON },
+interface NavigationSection {
+  label: string;
+  icon: IconName;
+  items: NavigationItem[];
+}
+
+const navigationSections: NavigationSection[] = [
+  {
+    label: "Operations",
+    icon: IconNames.CONTROL,
+    items: [
+      { label: "Runs", path: "/runs", icon: IconNames.AIRPLANE },
+    ],
+  },
+  {
+    label: "Assets",
+    icon: IconNames.DOCUMENT,
+    items: [
+      { label: "Scenarios", path: "/scenarios", icon: IconNames.DOCUMENT },
+    ],
+  },
+  {
+    label: "System",
+    icon: IconNames.COG,
+    items: [
+      { label: "Settings", path: "/settings", icon: IconNames.COG },
+    ],
+  },
 ];
+const navigation = navigationSections.flatMap((section) => section.items);
 
 function isActive(pathname: string, path: string) {
   return pathname === path || pathname.startsWith(`${path}/`);
@@ -85,28 +108,30 @@ export function AppShell({ children }: { children: ReactNode }) {
       </Navbar>
       <div className="app-workspace">
         <aside className="sidebar">
-          <div className="sidebar-title">
-            <Icon icon={IconNames.CONTROL} size={14} />
-            Operations
-          </div>
           <nav aria-label="Primary navigation">
-            <Menu className="sidebar-menu">
-              {navigation.map((item) => (
-                <MenuItem
-                  active={isActive(location.pathname, item.path)}
-                  aria-current={isActive(location.pathname, item.path) ? "page" : undefined}
-                  href={item.path}
-                  icon={item.icon}
-                  key={item.path}
-                  onClick={(event) => {
-                    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-                    event.preventDefault();
-                    navigate(item.path);
-                  }}
-                  text={item.label}
-                />
-              ))}
-            </Menu>
+            {navigationSections.map((section) => <section className="sidebar-section" key={section.label} aria-labelledby={`sidebar-${section.label.toLowerCase()}`}>
+              <div className="sidebar-title" id={`sidebar-${section.label.toLowerCase()}`}>
+                <Icon icon={section.icon} size={14} />
+                {section.label}
+              </div>
+              <Menu className="sidebar-menu">
+                {section.items.map((item) => (
+                  <MenuItem
+                    active={isActive(location.pathname, item.path)}
+                    aria-current={isActive(location.pathname, item.path) ? "page" : undefined}
+                    href={item.path}
+                    icon={item.icon}
+                    key={item.path}
+                    onClick={(event) => {
+                      if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                      event.preventDefault();
+                      navigate(item.path);
+                    }}
+                    text={item.label}
+                  />
+                ))}
+              </Menu>
+            </section>)}
           </nav>
         </aside>
         <div className="app-content">{children}</div>

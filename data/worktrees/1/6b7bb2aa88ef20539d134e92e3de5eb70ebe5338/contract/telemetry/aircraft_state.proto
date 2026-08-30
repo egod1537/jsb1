@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package jsb.telemetry.v1;
+
+// Stable aircraft state needed by the initial roll-hold analysis contract.
+// Roll is the 3-2-1 Euler body roll angle. Roll rate is body-axis p.
+message AircraftState {
+  uint64 sim_time_ns = 1;
+  double roll_rad = 2;
+  double roll_rate_rad_s = 3;
+}

@@ -1,0 +1,14 @@
+{
+  "modes": [
+    "single",
+    "compare"
+  ],
+  "variants": [
+    "baseline",
+    "primary"
+  ],
+  "compare_variants": [
+    "baseline",
+    "primary"
+  ]
+}

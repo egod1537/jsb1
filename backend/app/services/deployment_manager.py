@@ -2,17 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import http.client
 import json
 import logging
 import os
 import re
-import socket
 import ssl
-import subprocess
-import time
-import urllib.error
-import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -24,6 +18,12 @@ from app.repositories.deployments import (
     InvalidDeploymentTransition,
 )
 from app.services.repository_manager import RepositoryManager
+from app.infrastructure.deployment.verifier import (
+    DeploymentVerificationError,
+    DeploymentVerifier,
+)
+from app.infrastructure.deployment import ProcessCommandRunner
+from app.infrastructure.filesystem import AtomicFileStore
 
 
 class DeploymentOperationError(RuntimeError):
@@ -131,6 +131,8 @@ class DeploymentManager:
         settings: Settings,
         *,
         command_runner: CommandRunner | None = None,
+        verifier: DeploymentVerifier | None = None,
+        files: AtomicFileStore | None = None,
     ) -> None:
         self.deployments = deployments
         self.repositories = repositories
@@ -140,7 +142,9 @@ class DeploymentManager:
         self.caddy_config = settings.resolved_caddy_config_path.resolve()
         self.deployment_root.mkdir(parents=True, exist_ok=True)
         self.fragments_dir.mkdir(parents=True, exist_ok=True)
-        self._command_runner = command_runner or self._run_command
+        self._command_runner = command_runner or ProcessCommandRunner()
+        self.verifier = verifier or DeploymentVerifier(settings)
+        self.files = files or AtomicFileStore()
         self._locks_guard = asyncio.Lock()
         self._locks: dict[tuple[int, str], asyncio.Lock] = {}
         self._tasks: set[asyncio.Task[None]] = set()
@@ -271,7 +275,7 @@ class DeploymentManager:
                     if route_backup is None:
                         self._remove_caddy_fragment(deployment.slug)
                     else:
-                        self._atomic_write(
+                        self.files.write_text(
                             self._fragment_path(deployment.slug), route_backup
                         )
                     try:
@@ -473,8 +477,8 @@ class DeploymentManager:
             "}\n\n"
             f"import {self.fragments_dir}/*.caddy\n"
         )
-        self._atomic_write(self.caddy_config, content)
-        self._atomic_write(self.fragments_dir / "_empty.caddy", "\n")
+        self.files.write_text(self.caddy_config, content)
+        self.files.write_text(self.fragments_dir / "_empty.caddy", "\n")
 
     def _write_compose_override(self, deployment: BranchDeployment) -> Path:
         if deployment.frontend_port is None or deployment.backend_port is None:
@@ -503,7 +507,7 @@ volumes:
   deployment-data:
 """
         path = directory / "compose.override.yaml"
-        self._atomic_write(path, content)
+        self.files.write_text(path, content)
         return path
 
     def _write_caddy_fragment(self, deployment: BranchDeployment) -> Path:
@@ -518,7 +522,7 @@ volumes:
             "}\n"
         )
         path = self._fragment_path(deployment.slug)
-        self._atomic_write(path, content)
+        self.files.write_text(path, content)
         return path
 
     async def _reload_caddy(self) -> None:
@@ -592,93 +596,25 @@ volumes:
         )
 
     async def _wait_for_http(self, deployment: BranchDeployment) -> None:
-        if deployment.frontend_port is None:
-            raise DeploymentOperationError("deployment frontend port is not allocated")
-        url = (
-            f"http://{self.settings.deployment_health_host}:"
-            f"{deployment.frontend_port}/api/health"
-        )
-        await self._wait_until_healthy(lambda: self._http_ok(url), "application health check")
+        try:
+            await self.verifier.wait_for_http(deployment)
+        except DeploymentVerificationError as exc:
+            raise DeploymentOperationError(str(exc)) from exc
 
     async def _wait_for_https(self, hostname: str) -> None:
-        await self._wait_until_healthy(
-            lambda: self._https_ok(hostname), "HTTPS route health check"
-        )
-
-    async def _wait_until_healthy(
-        self, check: Callable[[], bool], label: str
-    ) -> None:
-        deadline = time.monotonic() + self.settings.deployment_health_timeout_sec
-        while time.monotonic() < deadline:
-            if await asyncio.to_thread(check):
-                return
-            await asyncio.sleep(self.settings.deployment_health_interval_sec)
-        raise DeploymentOperationError(f"{label} timed out")
-
-    @staticmethod
-    def _http_ok(url: str) -> bool:
         try:
-            with urllib.request.urlopen(url, timeout=3) as response:
-                return response.status == 200
-        except (OSError, urllib.error.URLError):
-            return False
+            await self.verifier.wait_for_https(hostname)
+        except DeploymentVerificationError as exc:
+            raise DeploymentOperationError(str(exc)) from exc
 
-    def _https_ok(self, hostname: str) -> bool:
-        context = ssl._create_unverified_context()
-        connection: socket.socket | ssl.SSLSocket | None = None
+    def _assert_ports_free(self, deployment: BranchDeployment) -> None:
         try:
-            connection = socket.create_connection(
-                (self.settings.caddy_health_host, self.settings.deployment_https_port),
-                timeout=3,
-            )
-            connection = context.wrap_socket(connection, server_hostname=hostname)
-            request = (
-                f"GET /api/health HTTP/1.1\r\nHost: {hostname}\r\n"
-                "Connection: close\r\n\r\n"
-            )
-            connection.sendall(request.encode("ascii"))
-            response = connection.recv(64)
-            return response.startswith((b"HTTP/1.1 200", b"HTTP/2 200"))
-        except (OSError, ssl.SSLError, http.client.HTTPException):
-            return False
-        finally:
-            if connection is not None:
-                connection.close()
-
-    @staticmethod
-    def _assert_ports_free(deployment: BranchDeployment) -> None:
-        for port in (deployment.frontend_port, deployment.backend_port):
-            if port is None:
-                raise DeploymentOperationError("deployment port is not allocated")
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                try:
-                    probe.bind(("127.0.0.1", port))
-                except OSError as exc:
-                    raise DeploymentOperationError(
-                        f"allocated deployment port {port} is already in use"
-                    ) from exc
+            self.verifier.assert_ports_free(deployment)
+        except DeploymentVerificationError as exc:
+            raise DeploymentOperationError(str(exc)) from exc
 
     def _occupied_ports(self) -> set[int]:
-        occupied: set[int] = set()
-        host = self.settings.deployment_port_probe_host
-        for port in range(
-            self.settings.deployment_port_start,
-            self.settings.deployment_port_end + 1,
-        ):
-            if host in ("127.0.0.1", "localhost"):
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-                    try:
-                        probe.bind(("127.0.0.1", port))
-                    except OSError:
-                        occupied.add(port)
-                continue
-            try:
-                with socket.create_connection((host, port), timeout=0.01):
-                    occupied.add(port)
-            except OSError:
-                pass
-        return occupied
+        return self.verifier.occupied_ports()
 
     def _previous_running(self, deployment: BranchDeployment) -> BranchDeployment | None:
         for item in self.deployments.list(repository_id=deployment.repository_id):
@@ -723,32 +659,6 @@ volumes:
         self._fragment_path(slug).unlink(missing_ok=True)
 
     @staticmethod
-    def _atomic_write(path: Path, content: str) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        temporary.write_text(content, encoding="utf-8")
-        temporary.replace(path)
-
-    @staticmethod
     def _safe_error(exc: Exception) -> str:
         message = str(exc).strip() or exc.__class__.__name__
         return message[:2000]
-
-    @staticmethod
-    def _run_command(command: list[str], cwd: Path | None, timeout: float) -> None:
-        try:
-            result = subprocess.run(
-                command,
-                cwd=cwd,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                shell=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise DeploymentOperationError(f"command could not be completed: {command[0]}") from exc
-        if result.returncode != 0:
-            lines = result.stderr.strip().splitlines()
-            detail = lines[-1][:500] if lines else f"exit code {result.returncode}"
-            raise DeploymentOperationError(f"{command[0]} command failed: {detail}")
