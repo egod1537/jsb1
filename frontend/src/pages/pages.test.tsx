@@ -57,7 +57,7 @@ function rollHoldAnalysis() {
       peak_aileron: "normalized", rms_aileron: "normalized", aileron_saturation_detected: "boolean",
       aileron_saturation_time_s: "s", aileron_saturation_fraction: "fraction",
     },
-    parameters: { command_start_sec: 5, settling_band_deg: 0.5 },
+    parameters: { command_start_sec: 5, settling_band_deg: 0.1 },
     targets: { settling_time_s: { value: 10, unit: "s", source: "default" } },
     regions: { response: { start_sec: 5, end_sec: 10 } },
     intervals: {},
@@ -399,13 +399,27 @@ describe("RunDetailPage", () => {
     expect(within(summary).getByText("#9")).toBeInTheDocument();
     expect(within(summary).getByText("REUSED")).toBeInTheDocument();
     expect(await within(summary).findByText("completed")).toBeInTheDocument();
-    fireEvent.click(within(summary).getByRole("button", { name: "View" }));
+    const scenarioAction = within(summary).getByRole("button", { name: "View Scenario Snapshot" });
+    const buildAction = within(summary).getByRole("button", { name: "View Build" });
+    const parameterAction = within(summary).getByRole("button", { name: "View Controller Parameters" });
+    for (const action of [scenarioAction, buildAction, parameterAction]) {
+      expect(action).toHaveTextContent("");
+      expect(action.querySelector(".bp6-icon-eye-open")).toBeInTheDocument();
+    }
+
+    fireEvent.mouseEnter(parameterAction);
+    expect(await screen.findByText("View Controller Parameters")).toBeInTheDocument();
+    fireEvent.mouseLeave(parameterAction);
+    fireEvent.focus(buildAction);
+    expect(await screen.findByText("View Build")).toBeInTheDocument();
+
+    fireEvent.click(parameterAction);
     const parameterDialog = await screen.findByRole("dialog", { name: "Run #52 · Controller Parameters" });
     expect(within(parameterDialog).getByText("Roll Rate P")).toBeInTheDocument();
     expect(within(parameterDialog).getByText("0.08")).toBeInTheDocument();
     fireEvent.click(within(parameterDialog).getByRole("button", { name: "Close" }));
 
-    fireEvent.click(within(summary).getByRole("button", { name: "View build #9" }));
+    fireEvent.click(buildAction);
     const dialog = await screen.findByRole("dialog", { name: "Build #9" });
     expect(within(dialog).getByText("abcdef1234567890")).toBeInTheDocument();
     expect(within(dialog).getByLabelText("Build pipeline")).toBeInTheDocument();
@@ -446,7 +460,7 @@ describe("RunDetailPage", () => {
     const executeGroup = screen.getByRole("button", { name: "Execute: failed" });
     fireEvent.click(executeGroup);
     expect(screen.getByRole("region", { name: "Execute detailed stages" })).toHaveTextContent("Launch Runner");
-    fireEvent.click(screen.getByRole("button", { name: "View scenario snapshot" }));
+    fireEvent.click(screen.getByRole("button", { name: "View Scenario Snapshot" }));
     expect(await screen.findByText("frozen run snapshot")).toBeInTheDocument();
   });
 

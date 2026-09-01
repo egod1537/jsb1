@@ -1,6 +1,6 @@
 import { Button, ButtonGroup, Callout, Dialog, DialogBody, Spinner, Tag } from "@blueprintjs/core";
 import { IconNames } from "@blueprintjs/icons";
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api } from "../../api/client";
 import { TimeSeriesChart, type ChartAnnotations, type ChartSeries } from "../../components/TimeSeriesChart";
 import type { RollHoldAnalysis, RollHoldAnalysisVariants, SignalResponse } from "../../types/api";
@@ -35,17 +35,17 @@ type AnalyzerPlotId = "roll_tracking" | "roll_rate" | "aileron";
 type DiagnosticFocus = { primary: AnalyzerPlotId; secondary?: AnalyzerPlotId; annotationIds: string[] };
 
 export const ROLL_HOLD_DIAGNOSTICS: Record<string, DiagnosticFocus> = {
-  rise_time: { primary: "roll_tracking", annotationIds: ["rise_10", "rise_90"] },
+  rise_time: { primary: "roll_tracking", annotationIds: ["rise_10", "rise_90", "rise_interval"] },
   settling_time: { primary: "roll_tracking", annotationIds: ["settled", "settling_band", "settling_region"] },
-  overshoot: { primary: "roll_tracking", annotationIds: ["peak_roll"] },
-  steady_state_error: { primary: "roll_tracking", annotationIds: ["steady_state_region"] },
-  rms_tracking_error: { primary: "roll_tracking", annotationIds: [] },
-  oscillation: { primary: "roll_tracking", secondary: "roll_rate", annotationIds: [] },
-  oscillation_count: { primary: "roll_tracking", secondary: "roll_rate", annotationIds: [] },
+  overshoot: { primary: "roll_tracking", annotationIds: ["peak_roll", "command_reference"] },
+  steady_state_error: { primary: "roll_tracking", annotationIds: ["steady_state_error_region", "steady_state_mean", "command_reference"] },
+  rms_tracking_error: { primary: "roll_tracking", annotationIds: ["tracking_error_region"] },
+  oscillation: { primary: "roll_tracking", secondary: "roll_rate", annotationIds: ["oscillation_region"] },
+  oscillation_count: { primary: "roll_tracking", secondary: "roll_rate", annotationIds: ["oscillation_region"] },
   residual_oscillation: { primary: "roll_tracking", annotationIds: ["residual_min", "residual_max", "steady_state_region"] },
-  dominant_period: { primary: "roll_tracking", secondary: "roll_rate", annotationIds: [] },
+  dominant_period: { primary: "roll_tracking", secondary: "roll_rate", annotationIds: ["oscillation_region"] },
   peak_aileron: { primary: "aileron", annotationIds: ["peak_aileron"] },
-  rms_aileron: { primary: "aileron", annotationIds: [] },
+  rms_aileron: { primary: "aileron", annotationIds: ["control_response_region"] },
   saturation_time: { primary: "aileron", annotationIds: ["saturation_limits", "saturation_intervals", "aileron_saturation"] },
 };
 const DEFAULT_PLOT_ORDER: AnalyzerPlotId[] = ["roll_tracking", "roll_rate", "aileron"];
@@ -101,6 +101,75 @@ function normalizeAnalysis(payload: RollHoldAnalysisVariants | RollHoldAnalysis)
   return { variants: { primary: payload } };
 }
 
+function statusIntent(status: RollHoldAnalysis["checks"][number]["status"]) {
+  return status === "pass" ? "success"
+    : status === "warn" ? "warning"
+      : status === "fail" ? "danger"
+        : "none";
+}
+
+interface TargetPerformanceNavigatorProps {
+  analyses: Record<string, RollHoldAnalysis>;
+  mode: AnalyzerMode;
+  result: RollHoldAnalysis;
+  selectedMetricId: string | null;
+  onClearFocus: () => void;
+  onSelectMetric: (check: RollHoldAnalysis["checks"][number]) => void;
+}
+
+function TargetPerformanceNavigator(props: TargetPerformanceNavigatorProps) {
+  const { analyses, mode, result, selectedMetricId, onClearFocus, onSelectMetric } = props;
+  const checks = mode === "compare" ? analyses.primary?.checks ?? result.checks : result.checks;
+
+  return <aside className="analyzer-targets" aria-label="Target Performance">
+    <header>
+      <span>Target Performance</span>
+      {selectedMetricId && <Button
+        aria-label="Clear Focus"
+        icon={IconNames.CROSS}
+        minimal
+        onClick={onClearFocus}
+        small
+        title="Clear Focus"
+      />}
+    </header>
+    <small className="analyzer-targets-note">JSB1 diagnostic targets, not certification limits.</small>
+    <nav className="analyzer-target-navigator" aria-label="Target performance metrics">
+      {TARGET_GROUPS.map(([category, label]) => <section className="analyzer-target-group" key={category}>
+        <h3>{label}</h3>
+        {checks.filter((check) => check.category === category).map((check) => {
+          const primary = analyses.primary?.checks.find((item) => item.id === check.id);
+          const baseline = analyses.baseline?.checks.find((item) => item.id === check.id);
+          const selectedCheck = mode === "compare" ? primary ?? baseline ?? check : check;
+          const delta = primary?.actual != null && baseline?.actual != null
+            ? primary.actual - baseline.actual
+            : null;
+          return <button
+            aria-label={check.label}
+            className={`analyzer-target-item${selectedMetricId === check.id ? " is-selected" : ""}`}
+            key={check.id}
+            onClick={() => onSelectMetric(selectedCheck)}
+            type="button"
+          >
+            <span className="analyzer-target-label">{check.label}</span>
+            {mode === "compare" ? <span className="analyzer-target-compare-values">
+              <span><small>Primary</small><strong>{formattedValue(primary?.actual ?? null, check.unit)}</strong></span>
+              <span><small>Baseline</small><strong>{formattedValue(baseline?.actual ?? null, check.unit)}</strong></span>
+              <span><small>Δ</small><strong>{delta == null ? "—" : formattedValue(delta, check.unit)}</strong></span>
+            </span> : <>
+              <span className="analyzer-target-result">
+                <strong>{formattedValue(check.actual, check.unit)}</strong>
+                <Tag minimal intent={statusIntent(check.status)}>{check.status === "unavailable" ? "N/A" : check.status.toUpperCase()}</Tag>
+              </span>
+              <small className="analyzer-target-source">Target {formattedValue(check.target, check.unit)} · {check.target_source === "default" ? "diagnostic default" : check.target_source}</small>
+            </>}
+          </button>;
+        })}
+      </section>)}
+    </nav>
+  </aside>;
+}
+
 export function RollHoldAnalyzerPanel(props: Props) {
   const { runId, timeline, onVisibleRangeChange, onCursorTimeChange, onFocusRange, onViewParameters } = props;
   const [open, setOpen] = useState(false);
@@ -147,22 +216,35 @@ export function RollHoldAnalyzerPanel(props: Props) {
     const { markers, regions, parameters } = result;
     const band = Number(parameters.settling_band_deg);
     const target = markers.command?.value;
+    const riseStart = markers.rise_10?.time_sec;
+    const riseEnd = markers.rise_90?.time_sec;
+    const settlingRegion = regions.settling ?? (focused.has("settling_region") ? regions.response : undefined);
     return {
       verticalLines: [
         ...(markers.command ? [{ time: markers.command.time_sec, label: "Command" }] : []),
         ...(markers.settled ? [{ time: markers.settled.time_sec, label: "Settled", emphasized: focused.has("settled") }] : []),
+        ...(markers.rise_10 ? [{ time: markers.rise_10.time_sec, label: "Rise 10%", emphasized: focused.has("rise_10") }] : []),
+        ...(markers.rise_90 ? [{ time: markers.rise_90.time_sec, label: "Rise 90%", emphasized: focused.has("rise_90") }] : []),
       ],
-      verticalAreas: [
-        ...(regions.settling ? [{ start: regions.settling.start_sec, end: regions.settling.end_sec, label: "Settling region", emphasized: focused.has("settling_region") }] : []),
-        ...(regions.steady_state ? [{ start: regions.steady_state.start_sec, end: regions.steady_state.end_sec, label: "Steady-state region", emphasized: focused.has("steady_state_region") }] : []),
-      ],
-      horizontalBands: target != null && Number.isFinite(band)
-        ? [{ minimum: target - band, maximum: target + band, label: `±${band}° settling band`, emphasized: focused.has("settling_band") }]
+      horizontalLines: target != null && Number.isFinite(target) && focused.has("command_reference")
+        ? [{ value: target, label: "Commanded roll", emphasized: true }]
         : [],
-      points: ["rise_10", "rise_90", "peak_roll", "residual_min", "residual_max"].flatMap((id) => {
+      verticalAreas: [
+        ...(settlingRegion ? [{ start: settlingRegion.start_sec, end: settlingRegion.end_sec, label: "Settling measurement", emphasized: focused.has("settling_region") }] : []),
+        ...(regions.steady_state ? [{ start: regions.steady_state.start_sec, end: regions.steady_state.end_sec, label: "Steady-state region", emphasized: focused.has("steady_state_region") }] : []),
+        ...(riseStart != null && riseEnd != null ? [{ start: riseStart, end: riseEnd, label: "Rise-time interval", emphasized: focused.has("rise_interval") }] : []),
+        ...(focused.has("steady_state_error_region") && regions.steady_state_error ? [{ start: regions.steady_state_error.start_sec, end: regions.steady_state_error.end_sec, label: "Steady-state error window", emphasized: true }] : []),
+        ...(focused.has("tracking_error_region") && regions.response ? [{ start: regions.response.start_sec, end: regions.response.end_sec, label: "RMS tracking window", emphasized: true }] : []),
+        ...(focused.has("oscillation_region") && regions.response ? [{ start: regions.response.start_sec, end: regions.response.end_sec, label: "Oscillation analysis window", emphasized: true }] : []),
+      ],
+      horizontalBands: target != null && Number.isFinite(target) && Number.isFinite(band) && band > 0
+        ? [{ minimum: target - band, maximum: target + band, label: `commanded ±${band}° band`, emphasized: focused.has("settling_band") }]
+        : [],
+      points: ["rise_10", "rise_90", "peak_roll", "steady_state_mean", "residual_min", "residual_max"].flatMap((id) => {
         const marker = markers[id];
         const labels: Record<string, string> = {
-          rise_10: "Rise 10%", rise_90: "Rise 90%", peak_roll: "Peak",
+          rise_10: "Rise 10%", rise_90: "Rise 90%", peak_roll: "Overshoot point",
+          steady_state_mean: "Steady-state mean",
           residual_min: "Residual min", residual_max: "Residual max",
         };
         return marker?.value == null ? [] : [{ time: marker.time_sec, value: marker.value, label: labels[id] ?? marker.label, emphasized: focused.has(id) }];
@@ -174,19 +256,41 @@ export function RollHoldAnalyzerPanel(props: Props) {
     const marker = result?.markers[id];
     return marker?.value == null ? undefined : { points: [{ time: marker.time_sec, value: marker.value, label: marker.label, emphasized: focused.has(id) }] };
   };
+  const rollRateAnnotations: ChartAnnotations = {
+    ...(markerAnnotations("peak_roll_rate") ?? {}),
+    verticalAreas: focused.has("oscillation_region") && result?.regions.response ? [{
+      start: result.regions.response.start_sec,
+      end: result.regions.response.end_sec,
+      label: "Oscillation analysis window",
+      emphasized: true,
+    }] : [],
+  };
   const aileronAnnotations: ChartAnnotations = {
     horizontalLines: typeof result?.parameters.aileron_limit === "number" ? [
       { value: result.parameters.aileron_limit, label: "+ saturation limit", emphasized: focused.has("saturation_limits") },
       { value: -result.parameters.aileron_limit, label: "− saturation limit", emphasized: focused.has("saturation_limits") },
     ] : [],
-    verticalAreas: result?.intervals.aileron_saturation?.map((interval) => ({
-      start: interval.start_sec, end: interval.end_sec, label: "Saturation", emphasized: focused.has("saturation_intervals"),
-    })) ?? [],
+    verticalAreas: [
+      ...(result?.intervals.aileron_saturation?.map((interval) => ({
+        start: interval.start_sec, end: interval.end_sec, label: "Saturation interval", emphasized: focused.has("saturation_intervals"),
+      })) ?? []),
+      ...(focused.has("control_response_region") && result?.regions.response ? [{
+        start: result.regions.response.start_sec,
+        end: result.regions.response.end_sec,
+        label: "Control RMS window",
+        emphasized: true,
+      }] : []),
+    ],
     points: [...(markerAnnotations("peak_aileron")?.points ?? []), ...(markerAnnotations("aileron_saturation")?.points ?? [])],
   };
 
+  const clearMetricFocus = () => {
+    setSelectedMetricId(null);
+    if (fullTimeRange[1] > fullTimeRange[0]) onFocusRange(...fullTimeRange);
+  };
+
   const selectMetric = (check: RollHoldAnalysis["checks"][number]) => {
-    if (selectedMetricId === check.id) return setSelectedMetricId(null);
+    if (selectedMetricId === check.id) return clearMetricFocus();
     setSelectedMetricId(check.id);
     if (check.start_sec != null && check.end_sec != null) onFocusRange(check.start_sec, check.end_sec);
   };
@@ -211,7 +315,7 @@ export function RollHoldAnalyzerPanel(props: Props) {
       <Button fill icon={IconNames.CHART} onClick={() => setOpen(true)} text="Open Roll Hold Analyzer" />
     </section>
     <Dialog className="roll-hold-analyzer-dialog" icon={IconNames.CHART} isOpen={open} onClose={() => setOpen(false)} title="Roll Hold Analyzer">
-      <DialogBody className="roll-hold-analyzer-dialog-body">
+      <DialogBody className="roll-hold-analyzer-dialog-body" useOverflowScrollContainer={false}>
         {!response && !error && <div className="analyzer-loading"><Spinner size={18} /><span>Analyzing telemetry</span></div>}
         {error && <Callout intent="warning">{error}</Callout>}
         {response && result && <div className="roll-hold-analyzer-content">
@@ -225,23 +329,29 @@ export function RollHoldAnalyzerPanel(props: Props) {
             <dl>{SUMMARY_METRICS.map(([name, label]) => <div key={name}><dt>{label}</dt><dd>{activeVariants.map((variant) => `${mode === "compare" ? `${variant}: ` : ""}${metricValue(analyses[variant], name)}`).join(" · ")}</dd></div>)}</dl>
             {activeVariants.flatMap((variant) => analyses[variant].missing_signals).length > 0 && <Callout compact intent="warning">Missing signals: {activeVariants.flatMap((variant) => analyses[variant].missing_signals.map((signal) => variants.length > 1 ? `${variant}/${signal}` : signal)).join(", ")}</Callout>}
           </section>
-          <section className="analyzer-targets" aria-label="Target Performance">
-            <header><span>Target Performance <small>Defaults are JSB1 diagnostic targets, not certification limits.</small></span>{selectedMetricId && <Button minimal small icon={IconNames.CROSS} onClick={() => setSelectedMetricId(null)}>Clear Focus</Button>}</header>
-            {mode === "compare" ? <table><thead><tr><th>Metric</th><th>Primary</th><th>Baseline</th><th>Delta</th></tr></thead><tbody>
-              {(analyses.primary?.checks ?? result.checks).map((check) => {
-                const primary = analyses.primary?.checks.find((item) => item.id === check.id);
-                const baseline = analyses.baseline?.checks.find((item) => item.id === check.id);
-                const delta = primary?.actual != null && baseline?.actual != null ? primary.actual - baseline.actual : null;
-                return <tr key={check.id} className={selectedMetricId === check.id ? "is-selected" : undefined} onClick={() => selectMetric(primary ?? baseline ?? check)}><th><button type="button" onClick={(event) => { event.stopPropagation(); selectMetric(primary ?? baseline ?? check); }}>{check.label}</button></th><td>{formattedValue(primary?.actual ?? null, check.unit)}</td><td>{formattedValue(baseline?.actual ?? null, check.unit)}</td><td>{delta == null ? "—" : formattedValue(delta, check.unit)}</td></tr>;
-              })}
-            </tbody></table> : <table><thead><tr><th>Metric</th><th>Actual</th><th>Target</th><th>Result</th></tr></thead><tbody>{TARGET_GROUPS.map(([category, label]) => <Fragment key={category}><tr className="analyzer-target-group"><th colSpan={4}>{label}</th></tr>{result.checks.filter((check) => check.category === category).map((check) => <tr key={check.id} className={selectedMetricId === check.id ? "is-selected" : undefined} onClick={() => selectMetric(check)}><th><button type="button" onClick={(event) => { event.stopPropagation(); selectMetric(check); }}>{check.label}</button></th><td>{formattedValue(check.actual, check.unit)}</td><td>{formattedValue(check.target, check.unit)}<small>{check.target_source === "default" ? "diagnostic default" : check.target_source}</small></td><td><Tag minimal intent={check.status === "pass" ? "success" : check.status === "warn" ? "warning" : check.status === "fail" ? "danger" : "none"}>{check.status === "unavailable" ? "N/A" : check.status.toUpperCase()}</Tag></td></tr>)}</Fragment>)}</tbody></table>}
-          </section>
-          <section className="analyzer-plots" aria-label="Roll Hold plots"><header>Plots</header><div className="roll-hold-analyzer-charts">{plotOrder.map((plotId) => <div key={plotId} className={`analyzer-plot-slot${diagnosticFocus?.primary === plotId ? " is-diagnostic-primary" : diagnosticFocus?.secondary === plotId ? " is-diagnostic-secondary" : ""}`} data-plot-id={plotId} data-diagnostic-role={diagnosticFocus?.primary === plotId ? "primary" : diagnosticFocus?.secondary === plotId ? "secondary" : "none"}>
-            {plotId === "roll_tracking" && <TimeSeriesChart title="Roll Tracking" unit="deg" series={[...diagnosticSeries("commanded_roll", true), ...diagnosticSeries("roll")]} annotations={rollAnnotations} fullTimeRange={fullTimeRange} timeline={timeline} onVisibleRangeChange={onVisibleRangeChange} onCursorTimeChange={onCursorTimeChange} />}
-            {plotId === "roll_rate" && <TimeSeriesChart title="Roll Rate" unit="deg/s" series={[...diagnosticSeries("commanded_roll_rate", true), ...diagnosticSeries("roll_rate")]} annotations={markerAnnotations("peak_roll_rate")} fullTimeRange={fullTimeRange} timeline={timeline} onVisibleRangeChange={onVisibleRangeChange} onCursorTimeChange={onCursorTimeChange} />}
-            {plotId === "aileron" && <TimeSeriesChart title="Aileron" unit="normalized" series={diagnosticSeries("aileron")} annotations={aileronAnnotations} fullTimeRange={fullTimeRange} timeline={timeline} onVisibleRangeChange={onVisibleRangeChange} onCursorTimeChange={onCursorTimeChange} />}
-          </div>)}</div></section>
-          <section className="analyzer-assessment" aria-label="Roll Hold assessment"><header>Assessment</header><div>{activeVariants.flatMap((variant) => analyses[variant].assessment.map((item) => <div key={`${variant}-${item.code}`}><Tag minimal intent={item.severity === "warning" ? "warning" : item.severity === "success" ? "success" : "none"}>{mode === "compare" ? variant : item.severity}</Tag><span>{item.message}</span></div>))}</div></section>
+          <div className="roll-hold-analyzer-workspace">
+            <TargetPerformanceNavigator
+              analyses={analyses}
+              mode={mode}
+              onClearFocus={clearMetricFocus}
+              onSelectMetric={selectMetric}
+              result={result}
+              selectedMetricId={selectedMetricId}
+            />
+            <div className="roll-hold-analyzer-main">
+              <section className="analyzer-plots" aria-label="Roll Hold plots">
+                <header>Plots</header>
+                <div className="analyzer-plots-scroll">
+                  <div className="roll-hold-analyzer-charts">{plotOrder.map((plotId) => <div key={plotId} className={`analyzer-plot-slot${diagnosticFocus?.primary === plotId ? " is-diagnostic-primary" : diagnosticFocus?.secondary === plotId ? " is-diagnostic-secondary" : ""}`} data-plot-id={plotId} data-diagnostic-role={diagnosticFocus?.primary === plotId ? "primary" : diagnosticFocus?.secondary === plotId ? "secondary" : "none"}>
+                    {plotId === "roll_tracking" && <TimeSeriesChart title="Roll Tracking" unit="deg" series={[...diagnosticSeries("commanded_roll", true), ...diagnosticSeries("roll")]} annotations={rollAnnotations} fullTimeRange={fullTimeRange} timeline={timeline} onVisibleRangeChange={onVisibleRangeChange} onCursorTimeChange={onCursorTimeChange} />}
+                    {plotId === "roll_rate" && <TimeSeriesChart title="Roll Rate" unit="deg/s" series={[...diagnosticSeries("commanded_roll_rate", true), ...diagnosticSeries("roll_rate")]} annotations={rollRateAnnotations} fullTimeRange={fullTimeRange} timeline={timeline} onVisibleRangeChange={onVisibleRangeChange} onCursorTimeChange={onCursorTimeChange} />}
+                    {plotId === "aileron" && <TimeSeriesChart title="Aileron" unit="normalized" series={diagnosticSeries("aileron")} annotations={aileronAnnotations} fullTimeRange={fullTimeRange} timeline={timeline} onVisibleRangeChange={onVisibleRangeChange} onCursorTimeChange={onCursorTimeChange} />}
+                  </div>)}</div>
+                  <section className="analyzer-assessment" aria-label="Roll Hold assessment"><header>Assessment</header><div>{activeVariants.flatMap((variant) => analyses[variant].assessment.map((item) => <div key={`${variant}-${item.code}`}><Tag minimal intent={item.severity === "warning" ? "warning" : item.severity === "success" ? "success" : "none"}>{mode === "compare" ? variant : item.severity}</Tag><span>{item.message}</span></div>))}</div></section>
+                </div>
+              </section>
+            </div>
+          </div>
         </div>}
       </DialogBody>
     </Dialog>

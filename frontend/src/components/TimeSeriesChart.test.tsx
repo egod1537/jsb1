@@ -1,11 +1,12 @@
-import { act, render, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TimelineState } from "../features/plots/plotTypes";
-import { clampTooltipPosition, formatChartTooltip, TimeSeriesChart } from "./TimeSeriesChart";
+import { clampTooltipPosition, formatChartTooltip, TimeSeriesChart, type ChartAnnotations } from "./TimeSeriesChart";
 
 const echartsMock = vi.hoisted(() => {
   const handlers = new Map<string, (event: unknown) => void>();
   const zrHandlers = new Map<string, (event: unknown) => void>();
+  const resizeCallbacks: ResizeObserverCallback[] = [];
   const chart = {
     setOption: vi.fn(),
     dispatchAction: vi.fn((action: { type: string }) => {
@@ -22,7 +23,7 @@ const echartsMock = vi.hoisted(() => {
     dispose: vi.fn(),
     group: "",
   };
-  return { chart, handlers, zrHandlers };
+  return { chart, handlers, resizeCallbacks, zrHandlers };
 });
 
 vi.mock("echarts/core", () => ({
@@ -40,8 +41,17 @@ const initialTimeline: TimelineState = {
 
 beforeEach(() => {
   echartsMock.handlers.clear();
+  echartsMock.resizeCallbacks.length = 0;
   echartsMock.zrHandlers.clear();
   vi.clearAllMocks();
+  vi.stubGlobal("ResizeObserver", class {
+    constructor(callback: ResizeObserverCallback) {
+      echartsMock.resizeCallbacks.push(callback);
+    }
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  });
 });
 
 describe("TimeSeriesChart shared timeline adapter", () => {
@@ -77,16 +87,126 @@ describe("TimeSeriesChart shared timeline adapter", () => {
     await waitFor(() => expect(echartsMock.chart.setOption).toHaveBeenCalled());
     const option = echartsMock.chart.setOption.mock.calls
       .map(([value]) => value as { series?: Array<Record<string, unknown>> })
-      .find((value) => value.series?.[0]?.markLine) as { series: Array<Record<string, unknown>> };
-    expect(option.series[0].markLine).toBeTruthy();
-    expect(option.series[0].markArea).toBeTruthy();
-    expect(option.series[0].markPoint).toBeTruthy();
-    const markLine = option.series[0].markLine as { data: Array<{ lineStyle?: { width?: number } }> };
-    const markPoint = option.series[0].markPoint as { data: Array<{ symbolSize?: number }> };
-    const markArea = option.series[0].markArea as { data: Array<Array<{ itemStyle?: { borderWidth?: number } }>> };
+      .find((value) => value.series?.some((item) => item.id === "__jsb1_chart_annotations__")) as { series: Array<Record<string, unknown>> };
+    const telemetry = option.series.find((item) => item.name === "Roll")!;
+    const annotationHelper = option.series.find((item) => item.id === "__jsb1_chart_annotations__")!;
+    expect(telemetry).not.toHaveProperty("markLine");
+    expect(annotationHelper.markLine).toBeTruthy();
+    expect(annotationHelper.markArea).toBeTruthy();
+    expect(annotationHelper.markPoint).toBeTruthy();
+    const markLine = annotationHelper.markLine as { data: Array<{ lineStyle?: { width?: number } }> };
+    const markPoint = annotationHelper.markPoint as {
+      silent?: boolean;
+      data: Array<{
+        symbolSize?: number;
+        itemStyle?: { borderWidth?: number };
+        label?: { show?: boolean };
+        tooltip?: { formatter?: string };
+      }>;
+    };
+    const markArea = annotationHelper.markArea as { data: Array<Array<{ itemStyle?: { borderWidth?: number } }>> };
     expect(markLine.data[0].lineStyle?.width).toBe(2);
-    expect(markPoint.data[0].symbolSize).toBe(11);
+    expect(annotationHelper.silent).toBe(false);
+    expect(markPoint.silent).toBe(false);
+    expect(markPoint.data[0].symbolSize).toBe(18);
+    expect(markPoint.data[0].itemStyle?.borderWidth).toBe(3);
+    expect(markPoint.data[0].label?.show).toBe(true);
+    expect(markPoint.data[0].tooltip?.formatter).toBe("Peak\nt = 5.000 s\n6.000°");
     expect(markArea.data[0][0].itemStyle?.borderWidth).toBe(1);
+  });
+
+  it("preserves independent legend selections across timeline, annotation, range, series, and resize updates", async () => {
+    const chartSeries = [
+      { name: "Commanded Roll", time: [0, 5, 10], values: [0, 5, 5] },
+      { name: "PX4 / Roll", time: [0, 5, 10], values: [0, 4, 5] },
+      { name: "My / Roll", time: [0, 5, 10], values: [0, 4.5, 5] },
+    ];
+    const renderChart = (
+      timeline: TimelineState,
+      annotations: ChartAnnotations = { verticalLines: [{ time: 5, label: "Command" }] },
+      series = chartSeries,
+    ) => <TimeSeriesChart
+      annotations={annotations}
+      fullTimeRange={[0, 10]}
+      series={series}
+      timeline={timeline}
+      title="Roll"
+      unit="deg"
+    />;
+    const { rerender } = render(renderChart(initialTimeline));
+    await waitFor(() => expect(echartsMock.handlers.has("legendselectchanged")).toBe(true));
+
+    type FullOption = {
+      legend?: { data?: string[]; selected?: Record<string, boolean> };
+      series?: Array<{ id?: string; name?: string; markLine?: unknown; markArea?: { data?: unknown[] } }>;
+    };
+    const latestFullOption = () => echartsMock.chart.setOption.mock.calls
+      .map(([option]) => option as FullOption)
+      .filter((option) => option.series)
+      .at(-1)!;
+
+    expect(latestFullOption().legend).toMatchObject({
+      data: ["Commanded Roll", "PX4 / Roll", "My / Roll"],
+      selected: { "Commanded Roll": true, "PX4 / Roll": true, "My / Roll": true },
+    });
+    expect(latestFullOption().legend?.data).not.toContain("__jsb1_chart_annotations__");
+
+    act(() => echartsMock.handlers.get("legendselectchanged")?.({ selected: { "PX4 / Roll": false } }));
+    rerender(renderChart({ ...initialTimeline, visibleStart: 1, visibleEnd: 9 }));
+    expect(echartsMock.chart.dispatchAction).toHaveBeenCalledWith(expect.objectContaining({ type: "dataZoom" }));
+
+    rerender(renderChart({ ...initialTimeline, visibleStart: 1, visibleEnd: 9, selectedRange: [2, 4] }));
+    expect(latestFullOption().legend?.selected).toEqual({
+      "Commanded Roll": true,
+      "PX4 / Roll": false,
+      "My / Roll": true,
+    });
+
+    act(() => echartsMock.handlers.get("legendselectchanged")?.({ selected: { "Commanded Roll": false } }));
+    rerender(renderChart(
+      { ...initialTimeline, selectedRange: [2, 4] },
+      { verticalLines: [{ time: 5, label: "Command", emphasized: true }] },
+    ));
+    expect(latestFullOption().legend?.selected).toEqual({
+      "Commanded Roll": false,
+      "PX4 / Roll": false,
+      "My / Roll": true,
+    });
+    const annotationHelper = latestFullOption().series?.find((item) => item.id === "__jsb1_chart_annotations__");
+    expect(annotationHelper?.markLine).toBeTruthy();
+    expect(annotationHelper?.markArea?.data).toHaveLength(1);
+
+    act(() => echartsMock.handlers.get("legendselectchanged")?.({ selected: { "PX4 / Roll": true, "My / Roll": false } }));
+    const chartElement = screen.getByLabelText("Roll chart");
+    Object.defineProperty(chartElement, "clientWidth", { configurable: true, value: 640 });
+    Object.defineProperty(chartElement, "clientHeight", { configurable: true, value: 320 });
+    act(() => echartsMock.resizeCallbacks[0]?.([], {} as ResizeObserver));
+    expect(echartsMock.chart.resize).toHaveBeenCalledWith({ width: 640, height: 320 });
+
+    const nextSeries = [chartSeries[0], chartSeries[2], { name: "Filtered Roll", time: [0, 10], values: [0, 5] }];
+    rerender(renderChart(
+      { ...initialTimeline, cursorTime: 6, selectedRange: [3, 5] },
+      { points: [{ time: 5, value: 5.5, label: "Peak", emphasized: true }] },
+      nextSeries,
+    ));
+    expect(latestFullOption().legend?.selected).toEqual({
+      "Commanded Roll": false,
+      "My / Roll": false,
+      "Filtered Roll": true,
+    });
+    expect(latestFullOption().legend?.selected).not.toHaveProperty("PX4 / Roll");
+
+    act(() => echartsMock.handlers.get("legendselectchanged")?.({ selected: { "Commanded Roll": true, "My / Roll": true } }));
+    rerender(renderChart(
+      { ...initialTimeline, cursorTime: 6, selectedRange: [4, 6] },
+      { horizontalBands: [{ minimum: 4.5, maximum: 5.5, label: "Settling band" }] },
+      nextSeries,
+    ));
+    expect(latestFullOption().legend?.selected).toEqual({
+      "Commanded Roll": true,
+      "My / Roll": true,
+      "Filtered Roll": true,
+    });
   });
 
   it("keeps only inside zoom in a plot and suppresses programmatic zoom echo", async () => {

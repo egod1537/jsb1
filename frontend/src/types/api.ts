@@ -163,12 +163,15 @@ export interface CreateRunInput {
 export interface ControllerParameterDefinition {
   id: string;
   display_name: string;
+  category?: string | null;
+  group?: string | null;
   symbol?: string | null;
   unit?: string | null;
   default_value: number;
   minimum?: number | null;
   maximum?: number | null;
   increment?: number | null;
+  step?: number | null;
   description?: string | null;
   variants: string[];
 }

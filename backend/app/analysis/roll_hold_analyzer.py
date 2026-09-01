@@ -12,7 +12,7 @@ from app.analysis.mcap_reader import McapRunReader
 
 
 RAD_TO_DEG = 180.0 / np.pi
-DEFAULT_SETTLING_BAND_DEG = 0.5
+DEFAULT_SETTLING_BAND_DEG = 0.1
 DEFAULT_RISE_TIME_LIMIT_SEC = 5.0
 DEFAULT_SETTLING_TIME_LIMIT_SEC = 10.0
 DEFAULT_OVERSHOOT_LIMIT_DEG = 1.0
@@ -196,7 +196,6 @@ class RollHoldAnalyzer:
         missing = [name for name in ROLL_HOLD_SIGNALS if name not in arrays]
 
         command, command_source = _roll_command(definition)
-        acceptance = _mapping(definition.get("acceptance"))
         initial_condition = _mapping(definition.get("initial_condition"))
         command_start = _number(command.get("start_sec"))
         if command_start is None:
@@ -223,12 +222,8 @@ class RollHoldAnalyzer:
         residual_limit, residual_limit_source = _limit(
             definition, "residual_pp_limit_deg", DEFAULT_RESIDUAL_PP_LIMIT_DEG,
         )
-        steady_limit = _number(acceptance.get("steady_state_error_limit_deg"))
-        if steady_limit is not None and steady_limit >= 0:
-            steady_limit_source: Literal["scenario", "default"] = "scenario"
-        else:
-            steady_limit = settling_band
-            steady_limit_source = settling_band_source
+        steady_limit = settling_band
+        steady_limit_source = settling_band_source
         saturation_time_limit, saturation_time_limit_source = _limit(
             definition, "saturation_time_limit_sec",
             DEFAULT_SATURATION_TIME_LIMIT_SEC,
@@ -300,8 +295,17 @@ class RollHoldAnalyzer:
                 steady_count = max(
                     1, int(np.ceil(len(error_deg) * DEFAULT_STEADY_STATE_FRACTION))
                 )
-                metrics["steady_state_error_deg"] = float(
-                    abs(np.mean(error_deg[-steady_count:]))
+                steady_error = error_deg[-steady_count:]
+                steady_roll = roll_deg[-steady_count:]
+                steady_time = response_time[-steady_count:]
+                metrics["steady_state_error_deg"] = float(abs(np.mean(steady_error)))
+                regions["steady_state_error"] = AnalysisRegion(
+                    start_sec=float(steady_time[0]), end_sec=float(steady_time[-1])
+                )
+                markers["steady_state_mean"] = RollHoldMarker(
+                    time_sec=float(steady_time[len(steady_time) // 2]),
+                    value=float(np.mean(steady_roll)),
+                    label="Steady-state mean",
                 )
                 oscillation_count, frequency = self._oscillation_metrics(
                     response_time, roll_deg - reference_deg, settling_band
@@ -669,12 +673,13 @@ class RollHoldAnalyzer:
     ) -> list[RollHoldCheck]:
         response = regions.get("response")
         steady = regions.get("steady_state")
+        steady_error = regions.get("steady_state_error")
 
         definitions = [
             ("rise_time", "Rise Time", "tracking", "rise_time_s", response),
             ("settling_time", "Settling Time", "tracking", "settling_time_s", response),
             ("overshoot", "Overshoot", "tracking", "overshoot_deg", response),
-            ("steady_state_error", "Steady-State Error", "tracking", "steady_state_error_deg", steady),
+            ("steady_state_error", "Steady-State Error", "tracking", "steady_state_error_deg", steady_error),
             ("rms_tracking_error", "RMS Tracking Error", "tracking", "rms_tracking_error_deg", response),
             ("oscillation", "Oscillation Cycles", "dynamics", "oscillation_count", response),
             ("residual_oscillation", "Residual P-P", "dynamics", "residual_oscillation_pp_deg", steady),

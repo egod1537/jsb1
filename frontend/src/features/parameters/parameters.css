@@ -1,18 +1,41 @@
-.controller-parameter-editor { display: grid; min-width: 0; gap: 12px; }
-.controller-parameter-preset-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--console-border); background: var(--console-surface); }
+.controller-parameter-editor { display: grid; width: 100%; min-width: 0; gap: 12px; }
+.controller-parameter-preset-row { display: grid; min-width: 0; grid-template-columns: minmax(260px, 1fr) auto auto; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--console-border); background: var(--console-surface); }
+.controller-parameter-preset-row > div { min-width: 260px; }
 .controller-parameter-preset-row strong,
 .controller-parameter-preset-row small { display: block; }
-.controller-parameter-preset-row strong { font: 600 12px var(--font-ui); }
-.controller-parameter-preset-row small { margin-top: 2px; color: var(--console-muted); font: 11px var(--font-ui); }
-.controller-parameter-grid { display: grid; grid-template-columns: repeat(2, minmax(240px, 1fr)); gap: 10px 18px; }
+.controller-parameter-preset-row strong { font: 600 12px var(--font-ui); white-space: nowrap; }
+.controller-parameter-preset-row small { max-width: 420px; margin-top: 2px; color: var(--console-muted); font: 11px/1.35 var(--font-ui); overflow-wrap: normal; word-break: normal; }
+.controller-parameter-preset-row .bp6-tag,
+.controller-parameter-preset-row .bp6-button { flex: 0 0 auto; white-space: nowrap; }
+.controller-parameter-grid { display: grid; width: 100%; min-width: 0; grid-template-columns: repeat(2, minmax(300px, 1fr)); gap: 16px 24px; }
 .controller-parameter-grid .bp6-form-group { min-width: 0; margin: 0; }
-.controller-parameter-label { display: flex; min-width: 0; align-items: baseline; justify-content: space-between; gap: 8px; }
-.controller-parameter-label code { color: var(--console-muted); font-size: 10.5px; white-space: nowrap; }
+.controller-parameter-label { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 8px; }
+.controller-parameter-label strong { min-width: 0; overflow-wrap: anywhere; }
+.controller-parameter-label code { min-width: 0; color: var(--console-muted); font-size: 10.5px; overflow-wrap: anywhere; text-align: right; }
 .controller-parameter-input-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 7px; }
-.controller-parameter-unit { min-width: 48px; color: var(--console-muted); font: 11px var(--font-ui); }
+.controller-parameter-unit { max-width: 92px; color: var(--console-muted); font: 11px var(--font-ui); overflow-wrap: anywhere; }
 .controller-parameter-range { margin-top: 3px; color: var(--console-muted); font-size: 10.5px; }
+.controller-parameter-description,
+.controller-parameter-error { display: block; overflow-wrap: anywhere; }
+.controller-parameter-error { margin-top: 3px; color: #fa999c; font-weight: 600; }
 .controller-parameters-dialog { width: min(760px, 92vw); }
 .controller-parameters-dialog table { width: 100%; }
+.controller-parameters-configure-dialog { display: flex; width: min(1100px, 92vw); min-width: min(900px, 92vw); height: min(90vh, 900px); height: min(90dvh, 900px); max-height: 90vh; max-height: 90dvh; flex-direction: column; overflow: hidden; }
+.controller-parameters-configure-body { display: flex; min-width: 0; min-height: 0; flex: 1 1 auto; padding: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; }
+.controller-parameters-configure-layout { display: flex; width: 100%; min-width: 0; min-height: 100%; flex: 0 0 auto; align-items: stretch; overflow: visible; }
+.controller-parameter-categories { width: 200px; min-width: 200px; flex: 0 0 200px; border-right: 1px solid var(--console-border); background: var(--console-surface); overflow: visible; }
+.controller-parameter-categories > header { padding: 12px 13px 8px; color: var(--console-muted); font: 600 10px var(--font-ui); letter-spacing: 0.045em; text-transform: uppercase; }
+.controller-parameter-categories nav { display: grid; gap: 2px; padding: 0 7px 10px; }
+.controller-parameter-categories button { display: flex; width: 100%; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 9px; border: 0; border-radius: 2px; background: transparent; color: var(--console-text-muted); font: 12px var(--font-ui); text-align: left; cursor: pointer; }
+.controller-parameter-categories button:hover { background: rgba(76, 144, 240, 0.08); color: var(--console-text); }
+.controller-parameter-categories button:focus-visible { outline: 1px solid #4c90f0; outline-offset: -1px; }
+.controller-parameter-categories button.is-active { background: rgba(76, 144, 240, 0.16); box-shadow: inset 3px 0 0 #4c90f0; color: #dbe8fa; }
+.controller-parameter-categories button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.controller-parameter-categories button small { flex: 0 0 auto; color: var(--console-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.controller-parameter-edit-pane { min-width: 0; min-height: 0; flex: 1 1 auto; padding: 16px 18px 20px; overflow: visible; }
+.controller-parameter-edit-pane .controller-parameter-preset-row { position: sticky; z-index: 2; top: -16px; }
+.controller-parameter-edit-pane > .bp6-callout { margin-top: 12px; }
+.controller-parameters-configure-dialog > .bp6-dialog-footer { flex: 0 0 auto; }
 .new-run-dialog { width: min(900px, 94vw); }
 .new-run-dialog .bp6-dialog-body { max-height: min(78vh, 900px); overflow-y: auto; }
 .new-run-scenario-row { display: flex; min-width: 0; align-items: stretch; gap: 8px; }
@@ -25,8 +48,25 @@
 .new-run-parameter-summary > div { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
 .new-run-parameter-summary strong { font: 600 13px var(--font-ui); }
 .new-run-parameter-summary small { color: var(--console-muted); font: 11px var(--font-ui); }
-@media (max-width: 720px) {
+@media (max-width: 940px) {
   .controller-parameter-grid { grid-template-columns: 1fr; }
-  .controller-parameter-preset-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .controller-parameter-preset-row { grid-template-columns: minmax(240px, 1fr) auto; }
   .controller-parameter-preset-row .bp6-button { grid-column: 1 / -1; justify-self: start; }
+}
+@media (max-width: 720px) {
+  .controller-parameters-configure-dialog { width: calc(100vw - 16px); height: 92vh; height: 92dvh; max-height: 92vh; max-height: 92dvh; }
+  .controller-parameter-categories { width: 160px; min-width: 160px; flex-basis: 160px; }
+  .controller-parameter-edit-pane { padding: 12px; }
+  .controller-parameter-edit-pane .controller-parameter-preset-row { top: -12px; }
+}
+@media (max-width: 560px) {
+  .controller-parameters-configure-layout { flex-direction: column; }
+  .controller-parameter-categories { width: 100%; min-width: 0; max-height: 116px; flex: 0 0 auto; border-right: 0; border-bottom: 1px solid var(--console-border); overflow-y: auto; }
+  .controller-parameter-categories > header { padding-bottom: 5px; }
+  .controller-parameter-categories nav { display: flex; overflow-x: auto; }
+  .controller-parameter-categories button { width: auto; min-width: 92px; flex: 0 0 auto; }
+  .controller-parameter-preset-row { grid-template-columns: 1fr; }
+  .controller-parameter-preset-row > div { min-width: 0; }
+  .controller-parameter-preset-row .bp6-tag,
+  .controller-parameter-preset-row .bp6-button { justify-self: start; }
 }

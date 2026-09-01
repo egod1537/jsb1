@@ -33,7 +33,7 @@ events:
       roll_deg: 5
 
 acceptance:
-  settling_band_deg: 0.5
+  settling_band_deg: 0.1
   settling_time_limit_sec: 0.1
   overshoot_limit_deg: 1
   max_oscillation_cycles: 2

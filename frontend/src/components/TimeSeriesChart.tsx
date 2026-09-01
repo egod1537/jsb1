@@ -51,6 +51,10 @@ type EventPayload = {
   axesInfo?: Array<{ value?: number | string }>;
 };
 
+type LegendSelectionPayload = {
+  selected?: Record<string, boolean>;
+};
+
 type TooltipItem = {
   axisValue?: number | string;
   axisValueLabel?: string;
@@ -119,6 +123,128 @@ function percentage(value: number, start: number, end: number): number {
   return Math.max(0, Math.min(100, ((value - start) / (end - start)) * 100));
 }
 
+const ANNOTATION_SERIES_ID = "__jsb1_chart_annotations__";
+
+function measurementTooltip(label: string, time: number, value: number, unit: string): string {
+  const suffix = unit === "deg" ? "°" : unit === "deg/s" ? "°/s" : unit ? ` ${unit}` : "";
+  return `${label}\nt = ${time.toFixed(3)} s\n${value.toFixed(3)}${suffix}`;
+}
+
+function annotationSeries(
+  annotations: ChartAnnotations | undefined,
+  selectedRange: [number, number] | null | undefined,
+  unit: string,
+) {
+  return {
+    id: ANNOTATION_SERIES_ID,
+    type: "line",
+    silent: false,
+    showSymbol: false,
+    symbol: "none",
+    lineStyle: { opacity: 0 },
+    tooltip: { show: false },
+    data: [],
+    markLine: {
+      silent: true,
+      symbol: "none",
+      lineStyle: { color: "#d69e2e", type: "dashed", width: 1 },
+      label: { color: "#f0b95f", fontSize: 10, formatter: "{b}", position: "insideEndTop", distance: 3, width: 90, overflow: "truncate" },
+      data: [
+        ...(annotations?.verticalLines?.map((line) => ({
+          name: line.label,
+          xAxis: line.time,
+          ...(line.emphasized ? {
+            lineStyle: { color: "#8abbff", width: 2, opacity: 1 },
+            label: { color: "#dbe8fa", fontWeight: 600 },
+          } : {}),
+        })) ?? []),
+        ...(annotations?.horizontalLines?.map((line) => ({
+          name: line.label,
+          yAxis: line.value,
+          ...(line.emphasized ? {
+            lineStyle: { color: "#ffb366", width: 2, opacity: 1 },
+            label: { color: "#ffe1bf", fontWeight: 600 },
+          } : {}),
+        })) ?? []),
+      ],
+    },
+    markPoint: {
+      silent: false,
+      symbol: "circle",
+      symbolSize: 8,
+      itemStyle: { color: "#f0b95f" },
+      label: { show: false },
+      data: annotations?.points?.map((point) => ({
+        name: point.label,
+        coord: [point.time, point.value],
+        tooltip: {
+          show: true,
+          trigger: "item",
+          formatter: measurementTooltip(point.label, point.time, point.value, unit),
+        },
+        ...(point.emphasized ? {
+          symbolSize: 18,
+          itemStyle: {
+            color: "#ff9f43",
+            borderColor: "#fff7e8",
+            borderWidth: 3,
+            shadowBlur: 10,
+            shadowColor: "rgba(255, 159, 67, 0.75)",
+          },
+          label: {
+            show: true,
+            color: "#fff7e8",
+            fontSize: 11,
+            fontWeight: 700,
+            formatter: "{b}",
+            position: "top",
+            distance: 8,
+            backgroundColor: "rgba(37, 42, 49, 0.92)",
+            borderColor: "#ffb366",
+            borderWidth: 1,
+            borderRadius: 3,
+            padding: [3, 5],
+          },
+        } : {}),
+      })) ?? [],
+    },
+    markArea: {
+      silent: true,
+      label: { color: "#abb3bf", fontSize: 10, position: "insideTopLeft", width: 110, overflow: "truncate" },
+      data: [
+        ...(annotations?.verticalAreas?.map((area) => ([
+          {
+            name: area.label,
+            xAxis: area.start,
+            itemStyle: {
+              color: area.emphasized ? "rgba(76, 144, 240, 0.2)" : area.color ?? "rgba(138, 187, 255, 0.08)",
+              ...(area.emphasized ? { borderColor: "rgba(138, 187, 255, 0.65)", borderWidth: 1 } : {}),
+            },
+            ...(area.emphasized ? { label: { color: "#dbe8fa", fontWeight: 600 } } : {}),
+          },
+          { xAxis: area.end },
+        ])) ?? []),
+        ...(annotations?.horizontalBands?.map((band) => ([
+          {
+            name: band.label,
+            yAxis: band.minimum,
+            itemStyle: {
+              color: band.emphasized ? "rgba(114, 202, 155, 0.2)" : "rgba(114, 202, 155, 0.08)",
+              ...(band.emphasized ? { borderColor: "rgba(114, 202, 155, 0.7)", borderWidth: 1 } : {}),
+            },
+            ...(band.emphasized ? { label: { color: "#d5f5e3", fontWeight: 600 } } : {}),
+          },
+          { yAxis: band.maximum },
+        ])) ?? []),
+        ...(selectedRange ? [[
+          { xAxis: selectedRange[0], itemStyle: { color: "rgba(138, 187, 255, 0.1)" } },
+          { xAxis: selectedRange[1] },
+        ]] : []),
+      ],
+    },
+  };
+}
+
 export function TimeSeriesChart({
   title,
   unit,
@@ -138,6 +264,7 @@ export function TimeSeriesChart({
   const domainRef = useRef(fullTimeRange ?? extent(series));
   const rangeHandlerRef = useRef(onVisibleRangeChange);
   const cursorHandlerRef = useRef(onCursorTimeChange);
+  const legendSelectionRef = useRef<Record<string, boolean>>({});
   const applyingSharedState = useRef(false);
   const sharedUpdateGeneration = useRef(0);
   domainRef.current = fullTimeRange ?? extent(series);
@@ -180,8 +307,15 @@ export function TimeSeriesChart({
       chart.dispatchAction({ type: "hideTip" });
       if (!applyingSharedState.current) cursorHandlerRef.current?.(null);
     };
+    const onLegendSelectionChanged = (raw: unknown) => {
+      const selected = (raw as LegendSelectionPayload).selected;
+      if (selected && typeof selected === "object") {
+        legendSelectionRef.current = { ...legendSelectionRef.current, ...selected };
+      }
+    };
     chart.on("datazoom", onDataZoom);
     chart.on("updateAxisPointer", onAxisPointer);
+    chart.on("legendselectchanged", onLegendSelectionChanged);
     chart.getZr().on("globalout", onPointerLeave);
     const resize = new ResizeObserver(() => {
       const width = element.current?.clientWidth ?? 0;
@@ -197,6 +331,7 @@ export function TimeSeriesChart({
       chart.getZr().off("globalout", onPointerLeave);
       chart.off("datazoom", onDataZoom);
       chart.off("updateAxisPointer", onAxisPointer);
+      chart.off("legendselectchanged", onLegendSelectionChanged);
       chart.dispose();
       chartRef.current = null;
     };
@@ -208,10 +343,25 @@ export function TimeSeriesChart({
     const [minimum, maximum] = fullTimeRange ?? extent(series);
     const visibleStart = timeline?.visibleStart ?? minimum;
     const visibleEnd = timeline?.visibleEnd ?? maximum;
+    const legendSelection = Object.fromEntries(series.map((item) => [
+      item.name,
+      legendSelectionRef.current[item.name] ?? true,
+    ]));
+    legendSelectionRef.current = legendSelection;
     applySharedState(() => chart.setOption({
       animation: false,
       color: series.map((item) => item.color).filter((color): color is string => Boolean(color)),
-      legend: { show: showLegend, right: 10, top: 5, textStyle: { color: "#abb3bf", fontSize: 10 }, itemWidth: 14, itemHeight: 7, icon: "roundRect" },
+      legend: {
+        show: showLegend,
+        data: series.map((item) => item.name),
+        selected: legendSelection,
+        right: 10,
+        top: 5,
+        textStyle: { color: "#abb3bf", fontSize: 10 },
+        itemWidth: 14,
+        itemHeight: 7,
+        icon: "roundRect",
+      },
       grid: { left: 54, right: 16, top: showLegend ? 32 : 10, bottom: 31 },
       tooltip: {
         trigger: "axis",
@@ -244,87 +394,15 @@ export function TimeSeriesChart({
       dataZoom: [
         { type: "inside", filterMode: "none", start: percentage(visibleStart, minimum, maximum), end: percentage(visibleEnd, minimum, maximum), moveOnMouseMove: true },
       ],
-      series: series.map((item, index) => ({
-        id: item.name, name: item.name, type: "line", showSymbol: false, sampling: "lttb",
-        lineStyle: { width: 1.4, type: item.dashed ? "dashed" : "solid" },
-        labelLayout: { hideOverlap: true, moveOverlap: "shiftY" },
-        data: item.time.map((time, index) => [time, item.values[index]]),
-        ...(index === 0 ? {
-          markLine: {
-            silent: true,
-            symbol: "none",
-            lineStyle: { color: "#d69e2e", type: "dashed", width: 1 },
-            label: { color: "#f0b95f", fontSize: 10, formatter: "{b}", position: "insideEndTop", distance: 3, width: 90, overflow: "truncate" },
-            data: [
-              ...(annotations?.verticalLines?.map((line) => ({
-                name: line.label,
-                xAxis: line.time,
-                ...(line.emphasized ? {
-                  lineStyle: { color: "#8abbff", width: 2, opacity: 1 },
-                  label: { color: "#dbe8fa", fontWeight: 600 },
-                } : {}),
-              })) ?? []),
-              ...(annotations?.horizontalLines?.map((line) => ({
-                name: line.label,
-                yAxis: line.value,
-                ...(line.emphasized ? {
-                  lineStyle: { color: "#ffb366", width: 2, opacity: 1 },
-                  label: { color: "#ffe1bf", fontWeight: 600 },
-                } : {}),
-              })) ?? []),
-            ],
-          },
-          markPoint: {
-            symbol: "circle",
-            symbolSize: 7,
-            itemStyle: { color: "#f0b95f" },
-            label: { color: "#f6f7f9", fontSize: 10, formatter: "{b}", position: "inside", width: 82, overflow: "truncate" },
-            data: annotations?.points?.map((point) => ({
-              name: point.label,
-              coord: [point.time, point.value],
-              ...(point.emphasized ? {
-                symbolSize: 11,
-                itemStyle: { color: "#ffb366", borderColor: "#fff0dc", borderWidth: 1 },
-                label: { color: "#fff0dc", fontWeight: 600 },
-              } : {}),
-            })) ?? [],
-          },
-          markArea: {
-            silent: true,
-            label: { color: "#abb3bf", fontSize: 10, position: "insideTopLeft", width: 110, overflow: "truncate" },
-            data: [
-              ...(annotations?.verticalAreas?.map((area) => ([
-                {
-                  name: area.label,
-                  xAxis: area.start,
-                  itemStyle: {
-                    color: area.emphasized ? "rgba(76, 144, 240, 0.2)" : area.color ?? "rgba(138, 187, 255, 0.08)",
-                    ...(area.emphasized ? { borderColor: "rgba(138, 187, 255, 0.65)", borderWidth: 1 } : {}),
-                  },
-                  ...(area.emphasized ? { label: { color: "#dbe8fa", fontWeight: 600 } } : {}),
-                },
-                { xAxis: area.end },
-              ])) ?? []),
-              ...(annotations?.horizontalBands?.map((band) => ([
-                {
-                  name: band.label,
-                  yAxis: band.minimum,
-                  itemStyle: {
-                    color: band.emphasized ? "rgba(114, 202, 155, 0.2)" : "rgba(114, 202, 155, 0.08)",
-                    ...(band.emphasized ? { borderColor: "rgba(114, 202, 155, 0.7)", borderWidth: 1 } : {}),
-                  },
-                  ...(band.emphasized ? { label: { color: "#d5f5e3", fontWeight: 600 } } : {}),
-                },
-                { yAxis: band.maximum },
-              ])) ?? []),
-              ...(timeline?.selectedRange ? [[
-                { xAxis: timeline.selectedRange[0], itemStyle: { color: "rgba(138, 187, 255, 0.1)" } },
-                { xAxis: timeline.selectedRange[1] },
-              ]] : []),
-            ],
-          },
-        } : {}),
-      })),
+      series: [
+        ...series.map((item) => ({
+          id: item.name, name: item.name, type: "line", showSymbol: false, sampling: "lttb",
+          lineStyle: { width: 1.4, type: item.dashed ? "dashed" : "solid" },
+          labelLayout: { hideOverlap: true, moveOverlap: "shiftY" },
+          data: item.time.map((time, index) => [time, item.values[index]]),
+        })),
+        annotationSeries(annotations, timeline?.selectedRange, unit),
+      ],
     }, { notMerge: true }));
   }, [series, unit, yAxisMin, yAxisMax, fullTimeRange, showLegend, annotations, timeline?.selectedRange, applySharedState]);
 

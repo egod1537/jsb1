@@ -227,6 +227,8 @@ def test_successful_run_flow_and_signal_api(settings) -> None:
         assert analysis_body["analyzer"] == "roll_hold"
         assert analysis_body["parameters"]["command_start_sec"] == 5
         assert analysis_body["parameters"]["settling_band_source"] == "scenario"
+        assert analysis_body["parameters"]["settling_band_deg"] == 0.1
+        assert analysis_body["parameters"]["steady_state_error_limit_deg"] == 0.1
         assert set(analysis_body["metrics"]) >= {
             "rise_time_s",
             "settling_time_s",
@@ -246,9 +248,16 @@ def test_successful_run_flow_and_signal_api(settings) -> None:
             "unit": "s",
             "source": "scenario",
         }
+        assert analysis_body["targets"]["steady_state_error_deg"] == {
+            "value": 0.1,
+            "unit": "deg",
+            "source": "scenario",
+        }
         assert analysis_body["targets"]["aileron_saturation_time_s"]["source"] == "unavailable"
         assert analysis_body["regions"]["response"]["start_sec"] == 5
+        assert analysis_body["regions"]["steady_state_error"]["start_sec"] >= 5
         assert analysis_body["markers"]["command"]["time_sec"] == 5
+        assert analysis_body["markers"]["steady_state_mean"]["value"] is not None
         assert {check["id"] for check in analysis_body["checks"]} == {
             "rise_time",
             "settling_time",

@@ -90,6 +90,7 @@ describe("ScenarioBuilderDialog", () => {
     expect(yaml).toHaveTextContent("events:");
     expect(yaml).toHaveTextContent("latitude_deg: 0");
     expect(yaml).toHaveTextContent("dt_sec: 0.01");
+    expect(yaml).toHaveTextContent("settling_band_deg: 0.1");
     expect(yaml).not.toHaveTextContent("autopilot");
     expect(yaml).toHaveTextContent("controller_parameters:");
     expect(yaml).toHaveTextContent("- FW_RR_P");

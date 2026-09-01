@@ -176,12 +176,15 @@ class RunSummary(BaseModel):
 class ControllerParameterDefinition(BaseModel):
     id: str
     display_name: str
+    category: str | None = None
+    group: str | None = None
     symbol: str | None = None
     unit: str | None = None
     default_value: float
     minimum: float | None = None
     maximum: float | None = None
     increment: float | None = None
+    step: float | None = None
     description: str | None = None
     variants: list[str] = Field(default_factory=list)
 

@@ -1,4 +1,4 @@
-import { Button, ButtonGroup } from "@blueprintjs/core";
+import { Button, ButtonGroup, Tooltip } from "@blueprintjs/core";
 import { IconNames } from "@blueprintjs/icons";
 import { Link, useParams } from "react-router-dom";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -35,6 +35,29 @@ const metricDefinitions: Record<string, string> = {
 
 function value(number: number | null, unit: string) {
   return number == null ? "Not settled" : `${number.toFixed(3)} ${unit}`;
+}
+
+function SummaryViewAction({
+  disabled = false,
+  label,
+  onClick,
+}: {
+  disabled?: boolean;
+  label: string;
+  onClick: () => void;
+}) {
+  return <span className="run-summary-view-action">
+    <Tooltip content={label} hoverOpenDelay={150}>
+      <Button
+        aria-label={label}
+        disabled={disabled}
+        icon={IconNames.EYE_OPEN}
+        minimal
+        onClick={onClick}
+        small
+      />
+    </Tooltip>
+  </span>;
 }
 
 export function RunDetailPage() {
@@ -101,16 +124,16 @@ export function RunDetailPage() {
         >Artifacts {artifacts.length}</Button>
       </>} />
       <section className="property-grid run-summary-panel" aria-label="Run summary">
-        <div><span>Scenario</span><strong>{run.scenario_name}</strong><Button aria-label="View scenario snapshot" icon={IconNames.EYE_OPEN} minimal onClick={() => setScenarioViewerOpen(true)} small>View Snapshot</Button></div>
+        <div><span>Scenario</span><div className="run-summary-value"><strong>{run.scenario_name}</strong><SummaryViewAction label="View Scenario Snapshot" onClick={() => setScenarioViewerOpen(true)} /></div></div>
         <div><span>Runtime</span><strong className="technical-value">{run.branch ?? run.build_branch ?? "detached"} @ {run.commit_sha?.slice(0, 10) ?? "—"}</strong><small>{run.repository_name ?? "Legacy runner"}</small></div>
         <div><span>Build</span><div className="run-build-summary">
           <strong className="technical-value">{run.build_id ? `#${run.build_id}` : "—"}</strong>
           {buildDetails.data && <StatusTag status={buildDetails.data.status} />}
           {buildReused && <small>REUSED</small>}
-          {run.build_id && <Button aria-label={`View build #${run.build_id}`} icon={IconNames.EYE_OPEN} minimal onClick={() => setBuildDetailsOpen(true)} small>View</Button>}
+          {run.build_id && <SummaryViewAction label="View Build" onClick={() => setBuildDetailsOpen(true)} />}
         </div></div>
         <div><span>Variants</span><strong className="technical-value">{runVariants.join(" + ")}</strong></div>
-        <div><span>Controller Parameters</span><strong className="technical-value">{Object.keys(run.controller_parameters ?? {}).length || "—"}</strong><Button disabled={Object.keys(run.controller_parameters ?? {}).length === 0} icon={IconNames.EYE_OPEN} minimal onClick={() => setParametersOpen(true)} small>View</Button></div>
+        <div><span>Controller Parameters</span><div className="run-summary-value"><strong className="technical-value">{Object.keys(run.controller_parameters ?? {}).length || "—"}</strong><SummaryViewAction disabled={Object.keys(run.controller_parameters ?? {}).length === 0} label="View Controller Parameters" onClick={() => setParametersOpen(true)} /></div></div>
         <div><span>Simulation</span><strong>{run.simulation_time_sec == null ? "—" : `${run.simulation_time_sec.toFixed(2)} s`}</strong></div>
         <div><span>Wall time</span><strong>{run.wall_time_sec == null ? "—" : `${run.wall_time_sec.toFixed(2)} s`}</strong></div>
       </section>

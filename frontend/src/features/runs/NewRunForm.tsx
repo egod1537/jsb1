@@ -18,7 +18,7 @@ import { ApiError, api } from "../../api/client";
 import type { Branch, ControllerParameterDefinition, ScenarioCatalogEntry, ScenarioSyncStatus } from "../../types/api";
 import { uniqueBranches } from "../../utils/branches";
 import { ScenarioViewerDialog } from "../scenarios/ScenarioViewerDialog";
-import { controllerParameterErrors } from "../parameters/ControllerParameterEditor";
+import { controllerParameterErrors, selectSupportedControllerParameterDefinitions } from "../parameters/ControllerParameterEditor";
 import { ControllerParameterConfigureDialog } from "../parameters/ControllerParameterConfigureDialog";
 
 interface Props {
@@ -52,7 +52,6 @@ export function NewRunForm({ onClose, initialBranch }: Props) {
   const [scenarioViewerOpen, setScenarioViewerOpen] = useState(false);
   const [parameterDefinitions, setParameterDefinitions] = useState<ControllerParameterDefinition[]>([]);
   const [controllerParameters, setControllerParameters] = useState<Record<string, number>>(initialControllerParameters);
-  const [controllerParameterDraft, setControllerParameterDraft] = useState<Record<string, number>>({});
   const [parametersDialogOpen, setParametersDialogOpen] = useState(false);
   const [parametersLoading, setParametersLoading] = useState(false);
   const [parametersError, setParametersError] = useState<string | null>(null);
@@ -174,15 +173,10 @@ export function NewRunForm({ onClose, initialBranch }: Props) {
     () => selectedScenario?.controller_parameters ?? [],
     [selectedScenario],
   );
-  const allowedParameterDefinitions = useMemo(() => {
-    const definitions = new Map(parameterDefinitions
-      .filter((item) => (item.variants ?? []).length === 0 || item.variants.some((value) => variants.includes(value)))
-      .map((item) => [item.id, item]));
-    return requestedParameterIds.flatMap((id) => {
-      const definition = definitions.get(id);
-      return definition ? [definition] : [];
-    });
-  }, [parameterDefinitions, requestedParameterIds, variants]);
+  const allowedParameterDefinitions = useMemo(
+    () => selectSupportedControllerParameterDefinitions(parameterDefinitions, requestedParameterIds, variants),
+    [parameterDefinitions, requestedParameterIds, variants],
+  );
   const unsupportedParameterIds = useMemo(() => {
     if (
       parametersResolvedBranch !== branch
@@ -223,24 +217,11 @@ export function NewRunForm({ onClose, initialBranch }: Props) {
   }, [selectedScenario]);
 
   function openControllerParameters() {
-    setControllerParameterDraft(Object.fromEntries(
-      allowedParameterDefinitions.map((item) => [
-        item.id,
-        Number.isFinite(controllerParameters[item.id])
-          ? controllerParameters[item.id]
-          : item.default_value,
-      ]),
-    ));
     setParametersDialogOpen(true);
   }
 
-  function applyControllerParameters() {
-    setControllerParameters(Object.fromEntries(
-      allowedParameterDefinitions.map((item) => [
-        item.id,
-        controllerParameterDraft[item.id] ?? item.default_value,
-      ]),
-    ));
+  function applyControllerParameters(values: Record<string, number>) {
+    setControllerParameters(values);
     setParametersDialogOpen(false);
   }
 
@@ -370,9 +351,7 @@ export function NewRunForm({ onClose, initialBranch }: Props) {
         isOpen={parametersDialogOpen}
         onApply={applyControllerParameters}
         onCancel={() => setParametersDialogOpen(false)}
-        onChange={setControllerParameterDraft}
-        values={controllerParameterDraft}
-        variants={variants}
+        values={controllerParameters}
       />
     </Dialog>
   );

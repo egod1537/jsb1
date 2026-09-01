@@ -379,6 +379,47 @@ describe("NewRunForm", () => {
     ));
   });
 
+  it("preserves all six supported Roll Hold parameters from Scenario whitelist to dialog", async () => {
+    const ids = ["FW_R_TC", "FW_RR_P", "FW_RR_I", "FW_RR_D", "FW_RR_FF", "FW_RR_IMAX"];
+    const defaults: Record<string, number> = {
+      FW_R_TC: 0.4, FW_RR_P: 0.05, FW_RR_I: 0.1, FW_RR_D: 0, FW_RR_FF: 0.5, FW_RR_IMAX: 0.2,
+    };
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      const body = path === "/api/scenarios" ? [{
+        id: "roll_hold.yaml", name: "Roll hold", source: "bundled", valid: true,
+        controller_parameters: ids, scenario_sha256: "a".repeat(64),
+      }] : path === "/api/runtime/repository" ? {
+        id: 1, default_branch: "impl", status: "ready",
+      } : path === "/api/runtime/branches" ? [{
+        name: "impl", commit_sha: "abc123456789", current: true, remote: true,
+      }] : path === "/api/scenarios/sync/status" ? {
+        configured: false, reachable: null, last_sync_at: null, last_success_at: null, last_error: null,
+      } : path.startsWith("/api/runtime/variants") ? {
+        branch: "impl", commit_sha: "abc123456789", mode: "compare", variants: ["baseline", "primary"],
+      } : path.startsWith("/api/runtime/parameters") ? {
+        branch: "impl", commit_sha: "abc123456789", parameters: ids.map((id) => ({
+          id,
+          display_name: id,
+          category: id === "FW_R_TC" ? "Attitude" : "Rate",
+          default_value: defaults[id],
+          minimum: 0,
+          maximum: 10,
+          variants: ["baseline"],
+        })),
+      } : [];
+      return Promise.resolve({ ok: true, status: 200, json: async () => body } as Response);
+    }));
+    render(<MemoryRouter><NewRunForm onClose={() => undefined} /></MemoryRouter>);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Configure" })).toBeEnabled());
+    expect(screen.getByText("6 parameters")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Configure" }));
+    const dialog = screen.getByRole("dialog", { name: "Configure Controller Parameters" });
+    expect(within(dialog).getByRole("button", { name: "Roll 6" })).toBeInTheDocument();
+    ids.forEach((id) => expect(within(dialog).getByLabelText(id)).toBeInTheDocument());
+  });
+
   it("blocks the Run when the selected branch lacks a declared parameter", async () => {
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
       const path = String(input);

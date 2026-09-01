@@ -155,7 +155,7 @@ def test_roll_hold_analyzer_step_response_metrics_and_command_window() -> None:
             "command": {"type": "roll_hold", "roll_deg": 10},
         }],
         "acceptance": {
-            "settling_band_deg": 0.5,
+            "settling_band_deg": 0.1,
             "settling_time_limit_sec": 5,
             "overshoot_limit_deg": 1,
             "max_oscillation_cycles": 2,
@@ -185,9 +185,12 @@ def test_roll_hold_analyzer_step_response_metrics_and_command_window() -> None:
     assert result.markers["rise_90"].time_sec - result.markers["rise_10"].time_sec == pytest.approx(
         result.metrics["rise_time_s"]
     )
-    assert result.metrics["settling_time_s"] == pytest.approx(3.0, abs=0.03)
+    assert result.metrics["settling_time_s"] == pytest.approx(4.61, abs=0.03)
     assert result.metrics["overshoot_deg"] == pytest.approx(0.0)
     assert result.metrics["steady_state_error_deg"] < 0.01
+    assert result.regions["steady_state_error"].start_sec == pytest.approx(17.0, abs=0.02)
+    assert result.markers["steady_state_mean"].time_sec == pytest.approx(18.5, abs=0.02)
+    assert result.markers["steady_state_mean"].value == pytest.approx(10.0, abs=0.01)
     assert result.metrics["rms_tracking_error_deg"] > 0
     assert result.metrics["peak_roll_rate_deg_s"] == pytest.approx(10.0)
     assert result.metrics["peak_aileron"] == pytest.approx(0.2)
@@ -195,7 +198,11 @@ def test_roll_hold_analyzer_step_response_metrics_and_command_window() -> None:
     assert result.metrics["aileron_saturation_detected"] is None
     assert result.metrics["residual_oscillation_pp_deg"] < 0.01
     assert result.metrics["aileron_saturation_time_s"] is None
-    assert {check.id: check.status for check in result.checks} == {
+    checks = {check.id: check for check in result.checks}
+    assert checks["steady_state_error"].target == 0.1
+    assert checks["steady_state_error"].target_source == "scenario"
+    assert checks["steady_state_error"].start_sec == result.regions["steady_state_error"].start_sec
+    assert {check_id: check.status for check_id, check in checks.items()} == {
         "rise_time": "pass",
         "steady_state_error": "pass",
         "settling_time": "pass",
@@ -299,8 +306,12 @@ def test_roll_hold_analyzer_records_default_thresholds_and_not_settled() -> None
         },
     )
 
-    assert result.parameters["settling_band_deg"] == 0.5
+    assert result.parameters["settling_band_deg"] == 0.1
     assert result.parameters["settling_band_source"] == "default"
+    assert result.parameters["steady_state_error_limit_deg"] == 0.1
+    assert result.parameters["steady_state_error_limit_source"] == "default"
+    assert result.targets["steady_state_error_deg"].value == 0.1
+    assert result.targets["steady_state_error_deg"].source == "default"
     assert result.parameters["rise_time_limit_sec"] == 5
     assert result.parameters["rise_time_limit_source"] == "default"
     assert result.parameters["settling_time_limit_sec"] == 10

@@ -99,7 +99,7 @@ const ROLL_HOLD_TEST: RollHoldDraft = {
   commandTimeSec: 5,
   commandRollDeg: 5,
   controllerParameterIds: ["FW_R_TC", "FW_RR_P", "FW_RR_I", "FW_RR_D", "FW_RR_FF", "FW_RR_IMAX"],
-  settlingBandDeg: 0.5,
+  settlingBandDeg: 0.1,
   settlingTimeLimitSec: 20,
   overshootLimitDeg: 5,
   maxOscillationCycles: 10,

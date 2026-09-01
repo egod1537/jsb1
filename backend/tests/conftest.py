@@ -135,7 +135,7 @@ def settings(tmp_path: Path) -> Settings:
         "simulation": {"duration_sec": 30},
         "command": {"start_sec": 5, "roll_deg": 5},
         "acceptance": {
-            "settling_band_deg": 0.5,
+            "settling_band_deg": 0.1,
             "settling_time_limit_sec": 10,
             "overshoot_limit_deg": 1.0,
             "max_oscillation_cycles": 2,

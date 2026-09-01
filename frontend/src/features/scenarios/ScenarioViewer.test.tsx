@@ -31,7 +31,7 @@ const rollHold: ScenarioInspectionDetail = {
     trim: { enabled: false, mode: "Full" },
     simulation: { duration_sec: 30 },
     command: { start_sec: 5, roll_deg: 5 },
-    acceptance: { settling_band_deg: 0.5, settling_time_limit_sec: 20, overshoot_limit_deg: 5, max_oscillation_cycles: 10 },
+    acceptance: { settling_band_deg: 0.1, settling_time_limit_sec: 20, overshoot_limit_deg: 5, max_oscillation_cycles: 10 },
   },
   raw_yaml: "# original\nname: Roll Hold 5deg 30s\n",
 };

@@ -41,9 +41,12 @@ def test_parameter_contract_overrides_adapter_and_validation_is_strict(tmp_path)
         "parameters": [{
             "id": "ROLL_P",
             "display_name": "Roll P",
+            "category": "Roll",
+            "group": "Attitude",
             "default_value": 1.0,
             "minimum": 0.0,
             "maximum": 2.0,
+            "step": 0.01,
             "variants": ["primary"],
         }],
     }), encoding="utf-8")
@@ -52,6 +55,9 @@ def test_parameter_contract_overrides_adapter_and_validation_is_strict(tmp_path)
     assert catalog.source == "jsb0_contract"
     assert catalog.transport == "output/parameters.yaml"
     assert catalog.parameters[0].id == "ROLL_P"
+    assert catalog.parameters[0].category == "Roll"
+    assert catalog.parameters[0].group == "Attitude"
+    assert catalog.parameters[0].step == 0.01
 
     with pytest.raises(ControllerParameterError, match="Unsupported controller parameters"):
         service.resolve(tmp_path, "baseline", {"ROLL_P": 1.0})
