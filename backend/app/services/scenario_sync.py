@@ -3,12 +3,14 @@ from __future__ import annotations
 import hashlib
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
-import paramiko
-
 from app.domain.scenario import ScenarioSyncResult, ScenarioSyncStatus
+from app.domain.scenario_source import ScenarioSource, validate_object_id
+from app.domain.scenario_validation import ScenarioValidationPolicy
+from app.infrastructure.filesystem import AtomicFileStore
+from app.infrastructure.scenario import public_sftp_error
 from app.repositories.scenario_catalog import ScenarioCatalogRepository
 from app.services.repository_manager import (
     GitOperationError,
@@ -17,42 +19,46 @@ from app.services.repository_manager import (
     RuntimeRepositoryNotConfigured,
     RuntimeRepositoryUnavailable,
 )
-from app.services.scenario_sources.base import ScenarioSource, validate_object_id
 from app.services.scenario_validator import (
     ScenarioRuntime,
     ScenarioValidationUnavailable,
     ScenarioValidator,
 )
-from app.infrastructure.filesystem import AtomicFileStore
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 @dataclass(frozen=True)
-class CompatibilityContract:
+class StableScenarioContract:
     runtime_root: Path
     runtime: ScenarioRuntime
 
 
-class ScenarioCompatibilityResolver:
-    """Resolve the latest canonical JSB0 main contract once per operation."""
+class StableScenarioContractResolver:
+    """Resolve the stable/default JSB0 contract used only for catalog workflows."""
 
     def __init__(self, repositories: RepositoryManager) -> None:
         self.repositories = repositories
 
-    def resolve(self) -> CompatibilityContract:
+    def resolve(self) -> StableScenarioContract:
         runtime_repository = self.repositories.runtime_repository()
         self.repositories.fetch(runtime_repository.id)
-        revision = self.repositories.resolve_branch(runtime_repository.id, "main")
+        branch = runtime_repository.default_branch
+        revision = self.repositories.resolve_branch(runtime_repository.id, branch)
         worktree = self.repositories.prepare_worktree(
             runtime_repository.id, revision.commit_sha
         )
-        return CompatibilityContract(
+        return StableScenarioContract(
             runtime_root=worktree,
-            runtime=ScenarioRuntime(branch="main", commit=revision.commit_sha),
+            runtime=ScenarioRuntime(branch=branch, commit=revision.commit_sha),
         )
+
+
+# Compatibility names for extensions importing the pre-policy terminology.
+CompatibilityContract = StableScenarioContract
+ScenarioCompatibilityResolver = StableScenarioContractResolver
 
 
 class ScenarioSyncService:
@@ -63,7 +69,7 @@ class ScenarioSyncService:
         cache_root: Path,
         catalog: ScenarioCatalogRepository,
         validator: ScenarioValidator,
-        compatibility: ScenarioCompatibilityResolver,
+        compatibility: StableScenarioContractResolver,
         configuration_error: str | None = None,
         files: AtomicFileStore | None = None,
     ) -> None:
@@ -89,15 +95,20 @@ class ScenarioSyncService:
             return ScenarioSyncResult(
                 configured=self.configured,
                 reachable=False,
-                error=self.configuration_error or "SFTP scenario source is not configured",
+                error=(
+                    self.configuration_error
+                    or "SFTP scenario source is not configured"
+                ),
             )
         try:
             compatibility = self.compatibility.resolve()
             contract = self.validator.load_runtime_contract(compatibility.runtime_root)
-            objects = self.source.list_objects()
-        except Exception as exc:  # noqa: BLE001 - remote/runtime boundary must preserve cache
+            objects = self.source.list()
+        except Exception as exc:  # noqa: BLE001 - expose a stable sync failure
             message = self._public_error(exc)
-            self.catalog.update_sync_status(source="sftp", reachable=False, error=message)
+            self.catalog.update_sync_status(
+                source="sftp", reachable=False, error=message
+            )
             return ScenarioSyncResult(configured=True, reachable=False, error=message)
 
         now = utc_now()
@@ -111,15 +122,17 @@ class ScenarioSyncService:
         for item in objects:
             present.append(item.id)
             try:
-                raw = self.source.fetch(item.id)
+                raw = self.source.read(item.id)
                 yaml_text = raw.decode("utf-8")
-                validation = self.validator.validate_yaml(
+                evaluation = self.validator.evaluate_yaml(
                     yaml_text,
                     contract,
-                    runtime_branch="main",
+                    runtime_branch=compatibility.runtime.branch,
                     runtime_commit=compatibility.runtime.commit,
+                    policy=ScenarioValidationPolicy.CATALOG_STABLE,
                 )
-            except Exception as exc:  # noqa: BLE001 - one remote object must not abort the batch
+                validation = evaluation.result
+            except Exception as exc:  # noqa: BLE001 - isolate invalid remote objects
                 validation = None
                 errors = [
                     {
@@ -154,8 +167,8 @@ class ScenarioSyncService:
                 )
                 continue
             digest = hashlib.sha256(raw).hexdigest()
-            relative_cache = validate_object_id(item.id)
-            destination = self.cache_root.joinpath(*relative_cache.parts)
+            validate_object_id(item.id)
+            destination = self.cache_root / "objects" / digest[:2] / f"{digest}.yaml"
             previous = self.catalog.get("sftp", item.id)
             unchanged = (
                 previous is not None
@@ -163,11 +176,13 @@ class ScenarioSyncService:
                 and destination.is_file()
             )
             if not unchanged:
+                # Content-addressing means publishing new bytes can never replace
+                # the last-known-good object referenced by the catalog.
                 self.files.write_bytes(destination, raw)
             changed = self.catalog.upsert_valid(
                 source="sftp",
                 scenario_id=item.id,
-                cache_path=destination.relative_to(self.cache_root.parent.parent).as_posix(),
+                cache_path=destination.relative_to(self.cache_root).as_posix(),
                 name=validation.scenario.name,
                 autopilot=validation.scenario.autopilot,
                 sha256=digest,
@@ -189,7 +204,11 @@ class ScenarioSyncService:
             return ScenarioSyncStatus(configured=self.configured)
         return ScenarioSyncStatus(
             configured=self.configured,
-            reachable=bool(stored["reachable"]) if stored["reachable"] is not None else None,
+            reachable=(
+                bool(stored["reachable"])
+                if stored["reachable"] is not None
+                else None
+            ),
             last_sync_at=stored["last_sync_at"],
             last_success_at=stored["last_success_at"],
             last_error=stored["last_error"],
@@ -208,16 +227,10 @@ class ScenarioSyncService:
                 RuntimeRepositoryUnavailable,
             ),
         ):
-            return "JSB0 main scenario contract is unavailable"
-        if isinstance(exc, paramiko.BadHostKeyException):
-            return "SFTP host key verification failed"
-        if isinstance(exc, paramiko.AuthenticationException):
-            return "SFTP authentication failed"
-        if isinstance(exc, paramiko.SSHException):
-            detail = str(exc).lower()
-            if "known_hosts" in detail or "host key" in detail:
-                return "SFTP host key verification failed"
-            return "SFTP SSH connection failed"
+            return "configured JSB0 scenario contract is unavailable"
+        sftp_message = public_sftp_error(exc)
+        if sftp_message is not None:
+            return sftp_message
         if isinstance(exc, UnicodeError):
             return "Remote scenario is not valid UTF-8"
         if isinstance(exc, OSError):

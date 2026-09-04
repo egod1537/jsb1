@@ -401,7 +401,7 @@ describe("NewRunForm", () => {
         branch: "impl", commit_sha: "abc123456789", parameters: ids.map((id) => ({
           id,
           display_name: id,
-          category: id === "FW_R_TC" ? "Attitude" : "Rate",
+          module: "flight.roll",
           default_value: defaults[id],
           minimum: 0,
           maximum: 10,

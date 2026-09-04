@@ -17,9 +17,8 @@ import { Link, useLocation, useNavigate, useSearchParams } from "react-router-do
 import { ApiError, api } from "../../api/client";
 import type { Branch, ControllerParameterDefinition, ScenarioCatalogEntry, ScenarioSyncStatus } from "../../types/api";
 import { uniqueBranches } from "../../utils/branches";
-import { ScenarioViewerDialog } from "../scenarios/ScenarioViewerDialog";
-import { controllerParameterErrors, selectSupportedControllerParameterDefinitions } from "../parameters/ControllerParameterEditor";
-import { ControllerParameterConfigureDialog } from "../parameters/ControllerParameterConfigureDialog";
+import { ControllerParameterConfigureDialog, controllerParameterErrors, selectSupportedControllerParameterDefinitions } from "../parameters";
+import { ScenarioViewerDialog } from "../scenarios";
 
 interface Props {
   onClose: () => void;
@@ -111,14 +110,28 @@ export function NewRunForm({ onClose, initialBranch }: Props) {
     Promise.allSettled([api.runtimeVariants(branch), api.runtimeParameters(branch)])
       .then(([capabilityResult, parameterResult]) => {
         if (!active) return;
+        if (
+          capabilityResult.status === "fulfilled"
+          && parameterResult.status === "fulfilled"
+          && Boolean(capabilityResult.value.commit_sha)
+          && Boolean(parameterResult.value.commit_sha)
+          && capabilityResult.value.commit_sha !== parameterResult.value.commit_sha
+        ) {
+          setVariants([]);
+          setHeadlessMode("");
+          setParameterDefinitions([]);
+          setVariantError("JSB0 branch changed while loading its Runtime contract; reload the selection");
+          setParametersError("Runtime contract revision mismatch");
+          return;
+        }
         let supported: string[] = [];
         if (capabilityResult.status === "fulfilled") {
           const capability = capabilityResult.value;
           supported = Array.isArray(capability.variants) ? capability.variants : [];
-          if (capability.mode !== "compare" || supported.length < 2) {
+          if (!capability.mode || supported.length === 0) {
             setVariants([]);
             setHeadlessMode("");
-            setVariantError("Selected JSB0 revision is not compare-only headless capable");
+            setVariantError("Selected JSB0 revision has no headless execution capability");
           } else {
             setVariants(supported);
             setHeadlessMode(capability.mode);
@@ -182,7 +195,7 @@ export function NewRunForm({ onClose, initialBranch }: Props) {
       parametersResolvedBranch !== branch
       || variantsLoading
       || variantError
-      || headlessMode !== "compare"
+      || !headlessMode
     ) return [];
     const supported = new Set(allowedParameterDefinitions.map((item) => item.id));
     return requestedParameterIds.filter((id) => !supported.has(id));
@@ -196,7 +209,7 @@ export function NewRunForm({ onClose, initialBranch }: Props) {
     variantsLoading,
   ]);
   const parameterValidationErrors = useMemo(
-    () => variantError || headlessMode !== "compare"
+    () => variantError || !headlessMode
       ? []
       : controllerParameterErrors(allowedParameterDefinitions, controllerParameters, variants),
     [allowedParameterDefinitions, controllerParameters, headlessMode, variantError, variants],
@@ -307,7 +320,7 @@ export function NewRunForm({ onClose, initialBranch }: Props) {
             </HTMLSelect>
           </FormGroup>
           {!branchesLoading && runtimeConfigured && branches.length === 0 && !error && <Callout compact intent={Intent.WARNING}>No JSB0 branches are available.</Callout>}
-          {!variantsLoading && headlessMode === "compare" && <Callout compact intent={Intent.PRIMARY}>
+          {!variantsLoading && headlessMode && <Callout compact intent={Intent.PRIMARY}>
             This revision runs {variants.join(" + ")} together in one Run.
           </Callout>}
           {variantError && <Callout compact intent={Intent.DANGER} role="alert">{variantError}</Callout>}
@@ -337,7 +350,7 @@ export function NewRunForm({ onClose, initialBranch }: Props) {
         </DialogBody>
         <DialogFooter actions={<>
           <Button type="button" onClick={onClose}>Cancel</Button>
-          <Button intent={Intent.PRIMARY} loading={submitting} type="submit" disabled={loading || branchesLoading || variantsLoading || (requestedParameterIds.length > 0 && (parametersLoading || Boolean(parametersError))) || unsupportedParameterIds.length > 0 || parameterValidationErrors.length > 0 || !runtimeConfigured || !selectedScenario || !branch || headlessMode !== "compare"}>Run simulation</Button>
+          <Button intent={Intent.PRIMARY} loading={submitting} type="submit" disabled={loading || branchesLoading || variantsLoading || (requestedParameterIds.length > 0 && (parametersLoading || Boolean(parametersError))) || unsupportedParameterIds.length > 0 || parameterValidationErrors.length > 0 || !runtimeConfigured || !selectedScenario || !branch || !headlessMode}>Run simulation</Button>
         </>} />
       </form>
       {selectedScenario && <ScenarioViewerDialog

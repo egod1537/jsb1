@@ -9,7 +9,7 @@ import {
   TooltipComponent,
 } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
-import type { TimelineState } from "../features/plots/plotTypes";
+import type { TimelineState } from "../types/view";
 
 echarts.use([LineChart, AxisPointerComponent, DataZoomComponent, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer]);
 

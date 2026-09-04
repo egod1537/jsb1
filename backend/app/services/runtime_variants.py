@@ -26,6 +26,6 @@ class RuntimeVariantService:
         self, runtime_worktree: Path
     ) -> HeadlessExecutionCapabilities:
         try:
-            return self.reader.load_headless_capabilities(runtime_worktree)
+            return self.reader.load_capabilities(runtime_worktree)
         except RuntimeContractError as exc:
             raise RuntimeVariantContractError(str(exc)) from exc

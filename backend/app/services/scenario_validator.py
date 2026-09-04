@@ -12,9 +12,11 @@ from jsonschema.exceptions import ValidationError
 from app.domain.scenario_validation import (
     ScenarioDocument,
     ScenarioDocumentError,
+    ScenarioEvaluation,
     ScenarioRuntime,
     ScenarioSummary,
     ScenarioValidationError,
+    ScenarioValidationPolicy,
     ScenarioValidationResult,
 )
 
@@ -67,19 +69,31 @@ class ScenarioValidator:
             )
         return self._document_from_content(content)
 
-    def load_runtime_contract(self, runtime_root: Path) -> RuntimeScenarioContract:
+    def load_runtime_contract(
+        self, runtime_root: Path, *, reader: Any | None = None
+    ) -> RuntimeScenarioContract:
         # Compatibility facade. Runtime contract path knowledge lives only in
         # RuntimeContractReader.
         from app.services.runtime_contract import RuntimeContractReader
 
-        schema = RuntimeContractReader().load_scenario_schema(runtime_root)
+        contract_reader = reader or RuntimeContractReader()
+        schema = contract_reader.load_scenario_schema(runtime_root)
         try:
-            from app.services.controller_parameters import RuntimeControllerParameterService
+            if contract_reader.is_indexed(runtime_root):
+                parameter_ids = frozenset(
+                    item.id for item in contract_reader.load_parameters(runtime_root)
+                )
+            else:
+                from app.services.controller_parameters import (
+                    RuntimeControllerParameterService,
+                )
 
-            parameter_ids = frozenset(
-                item.id
-                for item in RuntimeControllerParameterService().catalog(runtime_root).parameters
-            )
+                parameter_ids = frozenset(
+                    item.id
+                    for item in RuntimeControllerParameterService(
+                        contract_reader
+                    ).catalog(runtime_root).parameters
+                )
         except (OSError, RuntimeError, ValueError) as exc:
             raise ScenarioValidationUnavailable(
                 "JSB0 Runtime controller parameter contract is unavailable"
@@ -95,7 +109,26 @@ class ScenarioValidator:
         runtime_commit: str | None = None,
     ) -> ScenarioValidationResult:
         document = self._document_from_content(content)
-        errors = [self.format_contract_error(error) for error in self._errors(content, contract)]
+        return self.validate_document(
+            document,
+            contract,
+            runtime_branch=runtime_branch,
+            runtime_commit=runtime_commit,
+        )
+
+    def validate_document(
+        self,
+        document: ScenarioDocument,
+        contract: ScenarioContract,
+        *,
+        runtime_branch: str | None = None,
+        runtime_commit: str | None = None,
+    ) -> ScenarioValidationResult:
+        content = document.content
+        errors = [
+            self.format_contract_error(error)
+            for error in self._errors(content, contract)
+        ]
         supported = getattr(contract, "controller_parameter_ids", None)
         if supported is not None:
             errors.extend(self._controller_parameter_errors(content, supported))
@@ -107,6 +140,26 @@ class ScenarioValidator:
             errors=errors,
         )
 
+    def evaluate_document(
+        self,
+        document: ScenarioDocument,
+        contract: ScenarioContract,
+        *,
+        runtime_branch: str | None = None,
+        runtime_commit: str | None = None,
+        policy: ScenarioValidationPolicy,
+    ) -> ScenarioEvaluation:
+        return ScenarioEvaluation(
+            document=document,
+            result=self.validate_document(
+                document,
+                contract,
+                runtime_branch=runtime_branch,
+                runtime_commit=runtime_commit,
+            ),
+            policy=policy,
+        )
+
     def validate_yaml(
         self,
         yaml_text: str,
@@ -114,20 +167,44 @@ class ScenarioValidator:
         *,
         runtime_branch: str | None = None,
         runtime_commit: str | None = None,
+        policy: ScenarioValidationPolicy = ScenarioValidationPolicy.CATALOG_STABLE,
     ) -> ScenarioValidationResult:
-        try:
-            document = self.parse_yaml(yaml_text)
-        except ScenarioDocumentError as exc:
-            return ScenarioValidationResult(
-                valid=False,
-                runtime=self._runtime(runtime_branch, runtime_commit),
-                errors=exc.errors,
-            )
-        return self.validate_content(
-            document.content,
+        return self.evaluate_yaml(
+            yaml_text,
             contract,
             runtime_branch=runtime_branch,
             runtime_commit=runtime_commit,
+            policy=policy,
+        ).result
+
+    def evaluate_yaml(
+        self,
+        yaml_text: str,
+        contract: ScenarioContract,
+        *,
+        runtime_branch: str | None = None,
+        runtime_commit: str | None = None,
+        policy: ScenarioValidationPolicy = ScenarioValidationPolicy.CATALOG_STABLE,
+    ) -> ScenarioEvaluation:
+        """Parse once and return the document and its contract validation together."""
+        try:
+            document = self.parse_yaml(yaml_text)
+        except ScenarioDocumentError as exc:
+            return ScenarioEvaluation(
+                document=None,
+                result=ScenarioValidationResult(
+                    valid=False,
+                    runtime=self._runtime(runtime_branch, runtime_commit),
+                    errors=exc.errors,
+                ),
+                policy=policy,
+            )
+        return self.evaluate_document(
+            document,
+            contract,
+            runtime_branch=runtime_branch,
+            runtime_commit=runtime_commit,
+            policy=policy,
         )
 
     def validate_file(
@@ -137,6 +214,7 @@ class ScenarioValidator:
         *,
         runtime_branch: str | None = None,
         runtime_commit: str | None = None,
+        policy: ScenarioValidationPolicy = ScenarioValidationPolicy.CATALOG_STABLE,
     ) -> ScenarioValidationResult:
         try:
             yaml_text = path.read_text(encoding="utf-8")
@@ -157,6 +235,7 @@ class ScenarioValidator:
             contract,
             runtime_branch=runtime_branch,
             runtime_commit=runtime_commit,
+            policy=policy,
         )
 
     def validate_many(
@@ -166,6 +245,7 @@ class ScenarioValidator:
         *,
         runtime_branch: str | None = None,
         runtime_commit: str | None = None,
+        policy: ScenarioValidationPolicy = ScenarioValidationPolicy.CATALOG_STABLE,
     ) -> list[tuple[str, ScenarioValidationResult]]:
         return [
             (
@@ -175,6 +255,7 @@ class ScenarioValidator:
                     contract,
                     runtime_branch=runtime_branch,
                     runtime_commit=runtime_commit,
+                    policy=policy,
                 ),
             )
             for scenario_id, yaml_text in scenarios
@@ -203,7 +284,10 @@ class ScenarioValidator:
                 (
                     name
                     for name in error.validator_value
-                    if not isinstance(error.instance, dict) or name not in error.instance
+                    if (
+                        not isinstance(error.instance, dict)
+                        or name not in error.instance
+                    )
                 ),
                 None,
             )

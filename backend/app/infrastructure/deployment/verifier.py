@@ -41,9 +41,7 @@ class DeploymentVerifier:
             lambda: self.https_ok(hostname), "HTTPS route health check"
         )
 
-    async def wait_until_healthy(
-        self, check: Callable[[], bool], label: str
-    ) -> None:
+    async def wait_until_healthy(self, check: Callable[[], bool], label: str) -> None:
         deadline = time.monotonic() + self.settings.deployment_health_timeout_sec
         while time.monotonic() < deadline:
             if await asyncio.to_thread(check):
@@ -85,9 +83,7 @@ class DeploymentVerifier:
     def assert_ports_free(deployment: BranchDeployment) -> None:
         for port in (deployment.frontend_port, deployment.backend_port):
             if port is None:
-                raise DeploymentVerificationError(
-                    "deployment port is not allocated"
-                )
+                raise DeploymentVerificationError("deployment port is not allocated")
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
                 probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 try:

@@ -9,12 +9,11 @@ from app.repositories.runs import RunRepository
 from app.workers.build_scheduler import InProcessBuildScheduler
 from app.workers.scheduler import InProcessRunScheduler
 
-
 logger = logging.getLogger(__name__)
 
 
 class ExecutionWorker:
-    """Poll the durable SQLite queue and own all Build/Run subprocesses."""
+    """Poll durable rows and dispatch IDs; services atomically claim the work."""
 
     def __init__(
         self,

@@ -20,7 +20,7 @@ Persistence repositories and infrastructure adapters
       +-- CMake / JSB0 runner
       +-- SFTP / filesystem
       +-- HTTP / TLS deployment verification
-      +-- MCAP telemetry processing
+      +-- shared jsb1_analysis MCAP/metric core
 ```
 
 ## Runtime contract
@@ -29,11 +29,11 @@ Persistence repositories and infrastructure adapters
 of the JSB0 `contract/` tree. `ScenarioValidator` parses YAML and applies a
 supplied JSON Schema. Catalog inspection, SFTP sync, validation HTTP APIs, CI,
 and run creation all use that validation core. Execution capabilities and
-future telemetry catalog metadata enter through the same runtime-contract
-boundary.
-Controller parameter metadata follows that boundary through
-`contract/execution/parameters.json`; `RuntimeControllerParameterService` contains
-the one temporary PX4 Roll Hold adapter used while that JSB0 file is absent.
+telemetry catalog metadata enter through the same runtime-contract boundary.
+Indexed revisions are discovered through `contract/index.json`, materialized as
+one immutable-revision `RuntimeContractBundle`, and cached by repository id plus
+commit SHA. Controller parameter metadata and validation come from that bundle;
+the PX4 Roll Hold adapter is restricted to pre-index legacy revisions.
 
 ## Scenario lifecycle
 
@@ -56,8 +56,9 @@ source changes cannot alter an existing execution.
 resolve scenario
   -> resolve requested branch to immutable commit
   -> prepare immutable worktree
-  -> validate against that commit
-  -> require compare-only headless capabilities from that commit
+  -> load the complete Runtime contract from that commit
+  -> validate scenario and parameter whitelist against that contract
+  -> resolve declared execution mode, variants, and artifact paths
   -> resolve and validate controller parameters for all declared variants
   -> resolve/reuse BuildKey(repository_id, commit_sha)
   -> freeze scenario snapshot
@@ -75,8 +76,19 @@ so every child shares the exact scenario bytes, commit, and build.
 `BuildManager` for a verified executable, invokes the injected `SimulationRunner`,
 ingests the Runtime-owned `run.json`, registers artifacts, and updates lifecycle
 state. `RunTelemetryProcessor` consumes both variant namespaces from the resulting
-MCAP and computes metrics; execution does not resolve a
+MCAP through the shared contract-aware `TelemetryDataset` and computes metrics;
+execution does not resolve a
 branch, choose a build, or validate a mutable Scenario.
+
+## Analysis boundary
+
+The backend and notebook environment share the installable `jsb1_analysis`
+package. It owns contract-driven MCAP/protobuf decode, logical signal datasets,
+generic metric/frequency primitives, immutable offline Run bundles, and the
+analyzer registry. Backend analysis adds cache/error adapters and API-oriented
+assessment DTOs only. Indexed telemetry is decoded with the exact Run commit's
+signal catalog, exported descriptor, and variant list; display-unit conversion
+is deferred to the presentation/query layer.
 
 ## Repository and build boundaries
 

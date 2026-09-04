@@ -69,7 +69,12 @@ export const api = {
   fetchRuntimeRepository: () => request<RuntimeRepository>("/api/runtime/repository/fetch", { method: "POST" }),
   runtimeBranches: () => request<Branch[]>("/api/runtime/branches"),
   runtimeVariants: (branch?: string) => request<RuntimeVariants>(`/api/runtime/variants${branch ? `?${new URLSearchParams({ branch })}` : ""}`),
-  runtimeParameters: (branch?: string) => request<RuntimeControllerParameters>(`/api/runtime/parameters${branch ? `?${new URLSearchParams({ branch })}` : ""}`),
+  runtimeParameters: (branch?: string, commit_sha?: string | null) => {
+    const query = new URLSearchParams();
+    if (branch) query.set("branch", branch);
+    if (commit_sha) query.set("commit_sha", commit_sha);
+    return request<RuntimeControllerParameters>(`/api/runtime/parameters${query.size ? `?${query}` : ""}`);
+  },
   runs: (query = "") => request<RunSummary[]>(`/api/runs${query}`),
   run: (id: number) => request<RunDetail>(`/api/runs/${id}`),
   rollHoldAnalysis: (id: number) => request<RollHoldAnalysisVariants | RollHoldAnalysis>(`/api/runs/${id}/analysis/roll-hold`),

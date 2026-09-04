@@ -5,6 +5,8 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.domain.identifiers import CommitSha, RepositoryId
+
 
 class DeploymentStatus(str, Enum):
     QUEUED = "queued"
@@ -14,8 +16,31 @@ class DeploymentStatus(str, Enum):
     STOPPED = "stopped"
 
 
+DEPLOYMENT_STATUS_TRANSITIONS: dict[DeploymentStatus, frozenset[DeploymentStatus]] = {
+    DeploymentStatus.QUEUED: frozenset(
+        {
+            DeploymentStatus.STARTING,
+            DeploymentStatus.FAILED,
+            DeploymentStatus.STOPPED,
+        }
+    ),
+    DeploymentStatus.STARTING: frozenset(
+        {
+            DeploymentStatus.RUNNING,
+            DeploymentStatus.FAILED,
+            DeploymentStatus.STOPPED,
+        }
+    ),
+    DeploymentStatus.RUNNING: frozenset(
+        {DeploymentStatus.STARTING, DeploymentStatus.STOPPED}
+    ),
+    DeploymentStatus.FAILED: frozenset({DeploymentStatus.STOPPED}),
+    DeploymentStatus.STOPPED: frozenset(),
+}
+
+
 class DeploymentCreate(BaseModel):
-    repository_id: int = Field(gt=0)
+    repository_id: RepositoryId = Field(gt=0)
     branch: str = Field(min_length=1, max_length=255)
 
     @field_validator("branch")
@@ -30,9 +55,9 @@ class BranchDeployment(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    repository_id: int
+    repository_id: RepositoryId
     branch: str
-    commit_sha: str
+    commit_sha: CommitSha
     slug: str
     hostname: str
     status: DeploymentStatus

@@ -9,6 +9,7 @@ description = "JSB1 simulation regression and analysis server"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1",
+  "jsb1-analysis==0.1.0",
   "mcap>=1.2,<2",
   "mcap-protobuf-support>=0.5,<1",
   "jsonschema>=4.23,<5",
@@ -20,6 +21,9 @@ dependencies = [
   "scipy>=1.14,<2",
   "uvicorn[standard]>=0.32,<1",
 ]
+
+[tool.uv.sources]
+jsb1-analysis = { path = "../analysis", editable = true }
 
 [project.optional-dependencies]
 test = [

@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import pytest
 import yaml
-from mcap.writer import CompressionType, Writer
-
 from app.config.settings import Settings
 from app.services.runner import RunnerResult
+from mcap.writer import CompressionType, Writer
 
 
 def write_sample_mcap(
@@ -74,16 +73,19 @@ class FakeSimulationRunner:
     async def run(
         self,
         *,
-        scenario_path: Path,
-        output_directory: Path,
-        log_path: Path,
+        argv: Sequence[str],
+        stdout_path: Path,
+        stderr_path: Path,
         executable_path: Path | None = None,
-        parameters_path: Path | None = None,
+        cwd: Path | None = None,
         on_started: Callable[[int], None] | None = None,
     ) -> RunnerResult:
+        arguments = list(argv)
+        scenario_path = Path(arguments[arguments.index("--scenario") + 1])
+        output_directory = Path(arguments[arguments.index("--output") + 1])
         assert scenario_path.is_file()
-        if parameters_path is not None:
-            assert parameters_path.is_file()
+        parameters_path = output_directory / "parameters.yaml"
+        if parameters_path.is_file():
             payload = yaml.safe_load(parameters_path.read_text(encoding="utf-8"))
             self.parameter_sets_used.append(payload["controller_parameters"])
         else:
@@ -91,7 +93,7 @@ class FakeSimulationRunner:
         self.variants_used.extend(["baseline", "primary"])
         if on_started is not None:
             on_started(4242)
-        log_path.write_text("fake runner output\n", encoding="utf-8")
+        stdout_path.write_text("fake runner output\n", encoding="utf-8")
         if self.exit_code == 0 and self.create_telemetry:
             write_sample_mcap(output_directory / "telemetry.mcap")
             (output_directory / "run.json").write_text(json.dumps({

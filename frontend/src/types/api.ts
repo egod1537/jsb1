@@ -29,7 +29,7 @@ export interface RunSummary {
   scenario_sha256?: string | null;
   autopilot: string;
   execution_variant: string;
-  execution_mode?: "single" | "compare" | string;
+  execution_mode?: string;
   variants?: string[];
   comparison_id: number | null;
   created_at: string;
@@ -39,6 +39,9 @@ export interface RunSummary {
 
 export interface Run extends RunSummary {
   scenario_path: string;
+  parameter_snapshot_path?: string | null;
+  parameter_snapshot_sha256?: string | null;
+  contract_version?: string | null;
   started_at: string | null;
   finished_at: string | null;
   exit_code: number | null;
@@ -121,6 +124,8 @@ export interface Artifact {
   kind: string;
   filename: string;
   download_url: string;
+  sha256?: string | null;
+  size_bytes?: number | null;
 }
 
 export interface RunDetail {
@@ -146,6 +151,16 @@ export interface SignalMetadata {
   symbol_latex?: string | null;
   category?: string | null;
   subcategory?: string | null;
+  contract_id?: string | null;
+  topic?: string | null;
+  field?: string | null;
+  source_unit?: string | null;
+  frame?: string | null;
+  axis?: string | null;
+  sign?: string | null;
+  group?: string | null;
+  description?: string | null;
+  range?: Array<number | null> | null;
 }
 
 export interface AvailableSignalsResponse {
@@ -173,6 +188,14 @@ export interface ControllerParameterDefinition {
   increment?: number | null;
   step?: number | null;
   description?: string | null;
+  module?: string | null;
+  controller?: string | null;
+  type?: string;
+  aircraft?: string[];
+  algorithm_default?: number | null;
+  profiles?: Record<string, { value: number }>;
+  read_only?: boolean;
+  experimental?: boolean;
   variants: string[];
 }
 

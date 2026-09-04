@@ -5,6 +5,10 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
+from .primitives import absolute_overshoot
+from .primitives import settling_time as absolute_settling_time
+from .primitives import steady_state_error as mean_steady_state_error
+
 
 @dataclass(frozen=True)
 class StepResponseMetrics:
@@ -98,20 +102,23 @@ def calculate_step_metrics(
                 rise_time = float(
                     post_time[int(later_ninety[0])] - post_time[first_ten]
                 )
-        excursion = float(np.max(direction * (post_response - final_command)))
-        overshoot = max(0.0, excursion) / abs(step) * 100.0
+        overshoot = (
+            absolute_overshoot(commanded, actual, onset=onset) / abs(step) * 100.0
+        )
 
     band_scale = abs(step) if has_step else max(abs(final_command), 1.0)
-    within_band = np.abs(post_response - final_command) <= settling_band * band_scale
-    stays_within = np.logical_and.accumulate(within_band[::-1])[::-1]
-    settling_candidates = np.flatnonzero(stays_within)
-    settling_time = (
-        float(post_time[int(settling_candidates[0])] - post_time[0])
-        if settling_candidates.size
-        else None
+    settling_time = absolute_settling_time(
+        timeline,
+        actual - final_command,
+        band=settling_band * band_scale,
+        onset=onset,
     )
 
-    steady_state_error = abs(final_command - float(np.mean(actual[-tail_count:])))
+    steady_state_error = mean_steady_state_error(
+        commanded,
+        actual,
+        fraction=tail_count / timeline.size,
+    )
     if direction > 0:
         peak_index = onset + int(np.argmax(post_response))
     elif direction < 0:

@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import re
 import threading
-from pathlib import Path, PurePosixPath
-from urllib.parse import urlsplit
+from pathlib import Path
 
+from app.domain.errors import RepositoryConflict, RuntimeRevisionNotFound
 from app.domain.repository import (
     Branch,
     Repository,
@@ -13,15 +12,15 @@ from app.domain.repository import (
     Revision,
     RuntimeRepositoryStatus,
 )
-from app.repositories.jsb_repository_repository import (
-    JsbRepositoryRepository,
-    RepositoryConflict,
-)
 from app.infrastructure.git import (
     GitOperationError,
+    GitReferencePolicy,
     GitRepositoryAdapter,
+    InvalidRepositoryFilesystemPath,
+    RepositoryPathResolver,
     WorktreeManager,
 )
+from app.repositories.jsb_repository_repository import JsbRepositoryRepository
 
 
 class InvalidRepositoryPath(ValueError):
@@ -48,11 +47,10 @@ class RepositoryManager:
         git: GitRepositoryAdapter | None = None,
     ) -> None:
         self.repository = repository
-        self.repository_root = repository_root.resolve()
-        self.worktree_root = worktree_root.resolve()
+        self.paths = RepositoryPathResolver(repository_root, worktree_root)
+        self.repository_root = self.paths.repository_root
+        self.worktree_root = self.paths.worktree_root
         self.git = git or GitRepositoryAdapter()
-        self.repository_root.mkdir(parents=True, exist_ok=True)
-        self.worktree_root.mkdir(parents=True, exist_ok=True)
         self.worktrees = WorktreeManager(self.worktree_root, self.git)
         self._runtime_repository_id: int | None = None
         self._runtime_error: str | None = None
@@ -112,20 +110,12 @@ class RepositoryManager:
                 if not clone_required:
                     self._verify_repository(resolved_source)
             if clone_required:
-                resolved_source.parent.mkdir(parents=True, exist_ok=True)
-                self._run(
-                    [
-                        "git",
-                        "clone",
-                        "--origin",
-                        "origin",
-                        "--",
-                        normalized_url,
-                        str(resolved_source),
-                    ],
+                self.git.clone(
+                    normalized_url,
+                    resolved_source,
                     operation="clone JSB0 Runtime repository",
-                    cwd=resolved_source.parent,
                     timeout=300,
+                    runner=self._run,
                 )
             origin = self._optional_git(
                 resolved_source, ["remote", "get-url", "origin"]
@@ -216,19 +206,21 @@ class RepositoryManager:
             self._verify_repository(source)
         else:
             self._validate_remote_url(request.remote_url)
-            source.parent.mkdir(parents=True, exist_ok=True)
-            self._run(
-                ["git", "clone", "--origin", "origin", "--", request.remote_url, str(source)],
+            self.git.clone(
+                request.remote_url,
+                source,
                 operation="clone",
-                cwd=self.repository_root,
                 timeout=300,
+                runner=self._run,
             )
-        current_branch = self._optional_git(source, ["branch", "--show-current"]) or None
+        current_branch = (
+            self._optional_git(source, ["branch", "--show-current"]) or None
+        )
         default_branch = request.default_branch or current_branch or "main"
         record = self.repository.create(
             name=request.name,
             remote_url=request.remote_url,
-            local_path=PurePosixPath(request.local_path).as_posix(),
+            local_path=self._stored_path(source),
             default_branch=default_branch,
         )
         return self.status(record.id)
@@ -281,12 +273,16 @@ class RepositoryManager:
             record = self.repository.get(repository_id)
             source = self.path_for(record)
             origin = self._optional_git(source, ["remote", "get-url", "origin"])
-            arguments = [
-                "fetch",
-                "--prune",
-                "origin",
-                "+refs/heads/*:refs/remotes/origin/*",
-            ] if origin else ["fetch", "--all", "--prune"]
+            arguments = (
+                [
+                    "fetch",
+                    "--prune",
+                    "origin",
+                    "+refs/heads/*:refs/remotes/origin/*",
+                ]
+                if origin
+                else ["fetch", "--all", "--prune"]
+            )
             self._git(source, arguments, operation="fetch", timeout=300)
             self.repository.mark_fetched(repository_id)
             return self.status(repository_id)
@@ -318,7 +314,12 @@ class RepositoryManager:
                 continue
             seen.add((name, remote))
             branches.append(
-                Branch(name=name, commit_sha=sha, current=not remote and name == current, remote=remote)
+                Branch(
+                    name=name,
+                    commit_sha=sha,
+                    current=not remote and name == current,
+                    remote=remote,
+                )
             )
         return sorted(branches, key=lambda item: (item.remote, item.name.lower()))
 
@@ -341,9 +342,15 @@ class RepositoryManager:
         if len(parts) != 3:
             raise GitOperationError("git returned invalid commit metadata")
         branch_names = {
-            item.name for item in self.branches(repository_id) if item.commit_sha == commit_sha
+            item.name
+            for item in self.branches(repository_id)
+            if item.commit_sha == commit_sha
         }
-        branch = revision if revision in branch_names else next(iter(sorted(branch_names)), None)
+        branch = (
+            revision
+            if revision in branch_names
+            else next(iter(sorted(branch_names)), None)
+        )
         dirty = bool(self._git(source, ["status", "--porcelain"], operation="status"))
         return Revision(
             repository_id=repository_id,
@@ -368,7 +375,7 @@ class RepositoryManager:
             if commit_sha:
                 revision = self.revision(repository_id, commit_sha)
                 return revision.model_copy(update={"branch": branch})
-        raise GitOperationError(f"branch not found: {branch}")
+        raise RuntimeRevisionNotFound(f"branch not found: {branch}")
 
     def prepare_worktree(self, repository_id: int, commit_sha: str) -> Path:
         record = self.repository.get(repository_id)
@@ -380,22 +387,13 @@ class RepositoryManager:
         return self._source_path(repository.local_path)
 
     def _source_path(self, configured: str) -> Path:
-        filesystem_path = Path(configured).expanduser()
-        if filesystem_path.is_absolute():
-            resolved = filesystem_path.resolve()
-            if resolved == Path("/"):
-                raise InvalidRepositoryPath("repository path cannot be filesystem root")
-            return resolved
-        candidate = PurePosixPath(configured)
-        if not candidate.parts or ".." in candidate.parts:
-            raise InvalidRepositoryPath("local_path must not escape repository root")
-        return self._under(self.repository_root, self.repository_root.joinpath(*candidate.parts))
+        try:
+            return self.paths.source(configured)
+        except InvalidRepositoryFilesystemPath as exc:
+            raise InvalidRepositoryPath(str(exc)) from exc
 
     def _stored_path(self, source: Path) -> str:
-        try:
-            return source.relative_to(self.repository_root).as_posix()
-        except ValueError:
-            return str(source)
+        return self.paths.stored(source)
 
     def _matching_runtime_record(
         self, normalized_url: str, source_path: Path
@@ -416,7 +414,10 @@ class RepositoryManager:
                 same_path = self.path_for(record) == source_path
             except InvalidRepositoryPath:
                 same_path = False
-            if same_path or self.normalize_remote_url(record.remote_url) == normalized_url:
+            if (
+                same_path
+                or self.normalize_remote_url(record.remote_url) == normalized_url
+            ):
                 return record
         return None
 
@@ -463,73 +464,45 @@ class RepositoryManager:
             current_branch=status.current_branch,
             head_commit=status.head_commit,
             dirty=status.dirty,
-            status="error" if self._runtime_error else "warning" if error else status.status,
+            status="error"
+            if self._runtime_error
+            else "warning"
+            if error
+            else status.status,
             error=error,
         )
 
     @staticmethod
     def normalize_remote_url(value: str) -> str:
-        cleaned = value.strip().rstrip("/")
-        github = re.fullmatch(
-            r"(?:https?://github\.com/|ssh://git@github\.com/|git@github\.com:)"
-            r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?",
-            cleaned,
-            flags=re.IGNORECASE,
-        )
-        if github:
-            owner, repository = github.groups()
-            return f"https://github.com/{owner}/{repository}.git"
-        return cleaned
+        return GitReferencePolicy.normalize_remote_url(value)
 
     @classmethod
     def _display_name(cls, remote_url: str) -> str:
-        normalized = cls.normalize_remote_url(remote_url)
-        github = re.fullmatch(
-            r"https://github\.com/([^/]+)/([^/]+?)(?:\.git)?", normalized
+        return GitReferencePolicy.display_name(
+            remote_url, fallback=RUNTIME_REPOSITORY_KEY
         )
-        return f"{github.group(1)}/{github.group(2)}" if github else RUNTIME_REPOSITORY_KEY
 
     @staticmethod
     def _under(root: Path, candidate: Path) -> Path:
-        resolved = candidate.resolve()
         try:
-            resolved.relative_to(root.resolve())
-        except ValueError as exc:
-            raise InvalidRepositoryPath("path escapes configured root") from exc
-        return resolved
+            return RepositoryPathResolver.under(root, candidate)
+        except InvalidRepositoryFilesystemPath as exc:
+            raise InvalidRepositoryPath(str(exc)) from exc
 
     def _verify_repository(self, source: Path) -> None:
-        top = self._git(source, ["rev-parse", "--show-toplevel"], operation="validate repository")
+        top = self._git(
+            source, ["rev-parse", "--show-toplevel"], operation="validate repository"
+        )
         if Path(top).resolve() != source.resolve():
             raise InvalidRepositoryPath("local_path must point to a repository root")
 
     @staticmethod
     def _validate_remote_url(value: str) -> None:
-        parsed = urlsplit(value)
-        safe_scheme = (
-            parsed.scheme in {"https", "http", "ssh", "git"}
-            and bool(parsed.hostname)
-            and bool(parsed.path.strip("/"))
-        )
-        safe_scp = re.fullmatch(
-            r"[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[A-Za-z0-9._/~+-]+(?:/[A-Za-z0-9._~+-]+)*",
-            value,
-        )
-        if not safe_scheme and safe_scp is None:
-            raise GitOperationError("remote_url must use http(s), ssh, git, or scp syntax")
+        GitReferencePolicy.validate_remote_url(value)
 
     @staticmethod
     def validate_branch_name(value: str) -> None:
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,254}", value):
-            raise GitOperationError("invalid branch name")
-        if (
-            value.endswith(("/", ".", ".lock"))
-            or ".." in value
-            or "//" in value
-            or "@{" in value
-            or "/." in value
-        ):
-            raise GitOperationError("invalid branch name")
+        GitReferencePolicy.validate_branch_name(value)
 
     def _git(
         self,
@@ -552,6 +525,4 @@ class RepositoryManager:
         cwd: Path | None = None,
         timeout: float,
     ) -> str:
-        return self.git.run(
-            command, operation=operation, cwd=cwd, timeout=timeout
-        )
+        return self.git.run(command, operation=operation, cwd=cwd, timeout=timeout)

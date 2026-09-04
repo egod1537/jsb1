@@ -31,12 +31,31 @@ class Database:
             for migration in sorted(self.migrations_dir.glob("*.sql")):
                 if migration.stem in applied:
                     continue
-                connection.executescript(migration.read_text(encoding="utf-8"))
-                connection.execute(
+                script = migration.read_text(encoding="utf-8")
+                manages_foreign_keys = "PRAGMA foreign_keys" in script
+                if manages_foreign_keys:
+                    connection.execute("PRAGMA foreign_keys = OFF")
+                    script = "\n".join(
+                        line
+                        for line in script.splitlines()
+                        if not line.strip().lower().startswith("pragma foreign_keys")
+                    )
+                version = migration.stem.replace("'", "''")
+                transaction = (
+                    "BEGIN IMMEDIATE;\n"
+                    f"{script}\n"
                     "INSERT INTO schema_migrations(version, applied_at) "
-                    "VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
-                    (migration.stem,),
+                    f"VALUES ('{version}', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));\n"
+                    "COMMIT;"
                 )
+                try:
+                    connection.executescript(transaction)
+                except Exception:
+                    connection.rollback()
+                    raise
+                finally:
+                    if manages_foreign_keys:
+                        connection.execute("PRAGMA foreign_keys = ON")
 
     def ping(self) -> bool:
         try:
@@ -44,4 +63,3 @@ class Database:
                 return connection.execute("SELECT 1").fetchone()[0] == 1
         except sqlite3.Error:
             return False
-

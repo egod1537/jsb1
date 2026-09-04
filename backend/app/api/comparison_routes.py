@@ -6,11 +6,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.dependencies import (
     get_comparison_creation,
-    get_comparisons,
+    get_comparison_queries,
 )
+from app.domain.errors import RuntimeRevisionNotFound, SnapshotWriteFailed
 from app.domain.models import Comparison, ComparisonCreate
-from app.domain.errors import SnapshotWriteFailed
-from app.repositories.comparisons import ComparisonRepository
+from app.services.comparison_creation import (
+    ComparisonCreationService,
+    CreateComparisonCommand,
+)
+from app.services.comparison_queries import ComparisonNotFound, ComparisonQueryService
 from app.services.repository_manager import (
     GitOperationError,
     InvalidRepositoryPath,
@@ -19,11 +23,6 @@ from app.services.repository_manager import (
 )
 from app.services.runtime_variants import RuntimeVariantContractError
 from app.services.scenarios import InvalidScenario
-from app.services.comparison_creation import (
-    ComparisonCreationService,
-    CreateComparisonCommand,
-)
-
 
 router = APIRouter(prefix="/comparisons", tags=["comparisons"])
 
@@ -52,9 +51,10 @@ async def create_comparison(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except SnapshotWriteFailed as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except RuntimeRevisionNotFound as exc:
+        raise HTTPException(status_code=422, detail="Could not resolve JSB0 branch") from exc
     except (KeyError, GitOperationError, InvalidRepositoryPath, OSError) as exc:
-        detail = "Branch no longer exists" if str(exc).startswith("branch not found:") else "Could not resolve JSB0 branch"
-        raise HTTPException(status_code=422, detail=detail) from exc
+        raise HTTPException(status_code=422, detail="Could not resolve JSB0 branch") from exc
 
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -62,18 +62,18 @@ async def create_comparison(
 
 @router.get("", response_model=list[Comparison])
 def list_comparisons(
-    comparisons: Annotated[ComparisonRepository, Depends(get_comparisons)],
+    queries: Annotated[ComparisonQueryService, Depends(get_comparison_queries)],
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> list[Comparison]:
-    return comparisons.list(limit)
+    return queries.list(limit)
 
 
 @router.get("/{comparison_id}", response_model=Comparison)
 def comparison_detail(
     comparison_id: int,
-    comparisons: Annotated[ComparisonRepository, Depends(get_comparisons)],
+    queries: Annotated[ComparisonQueryService, Depends(get_comparison_queries)],
 ) -> Comparison:
     try:
-        return comparisons.get(comparison_id)
-    except KeyError as exc:
+        return queries.require(comparison_id)
+    except ComparisonNotFound as exc:
         raise HTTPException(status_code=404, detail="comparison not found") from exc

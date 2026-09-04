@@ -4,8 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "../../api/client";
 import { TimeSeriesChart, type ChartAnnotations, type ChartSeries } from "../../components/TimeSeriesChart";
 import type { RollHoldAnalysis, RollHoldAnalysisVariants, SignalResponse } from "../../types/api";
-import type { TimelineState } from "../plots/plotTypes";
-import { loadRunSignalUnion } from "../plots/runSignalDataSource";
+import { loadRunSignalUnion, type TimelineState } from "../plots";
 
 interface Props {
   runId: number;
@@ -30,7 +29,7 @@ const TARGET_GROUPS = [
   ["control", "Control"],
 ] as const;
 
-type AnalyzerMode = "primary" | "baseline" | "compare";
+type AnalyzerMode = string;
 type AnalyzerPlotId = "roll_tracking" | "roll_rate" | "aileron";
 type DiagnosticFocus = { primary: AnalyzerPlotId; secondary?: AnalyzerPlotId; annotationIds: string[] };
 
@@ -49,7 +48,11 @@ export const ROLL_HOLD_DIAGNOSTICS: Record<string, DiagnosticFocus> = {
   saturation_time: { primary: "aileron", annotationIds: ["saturation_limits", "saturation_intervals", "aileron_saturation"] },
 };
 const DEFAULT_PLOT_ORDER: AnalyzerPlotId[] = ["roll_tracking", "roll_rate", "aileron"];
-const COLORS: Record<string, string> = { primary: "#72ca9b", baseline: "#f2bd52" };
+const VARIANT_COLORS = ["#72ca9b", "#f2bd52", "#c58af9", "#79b8ff"];
+
+function displayVariant(variant: string): string {
+  return variant.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
 
 function displayUnit(unit: string): string {
   return unit === "deg" ? "°" : unit === "deg/s" ? "°/s" : unit;
@@ -98,7 +101,7 @@ async function loadAnalyzerTelemetry(runId: number, variant: string): Promise<Si
 
 function normalizeAnalysis(payload: RollHoldAnalysisVariants | RollHoldAnalysis): RollHoldAnalysisVariants {
   if ("variants" in payload) return payload;
-  return { variants: { primary: payload } };
+  return { variants: { default: payload } };
 }
 
 function statusIntent(status: RollHoldAnalysis["checks"][number]["status"]) {
@@ -119,7 +122,12 @@ interface TargetPerformanceNavigatorProps {
 
 function TargetPerformanceNavigator(props: TargetPerformanceNavigatorProps) {
   const { analyses, mode, result, selectedMetricId, onClearFocus, onSelectMetric } = props;
-  const checks = mode === "compare" ? analyses.primary?.checks ?? result.checks : result.checks;
+  const variants = Object.keys(analyses);
+  const preferredVariant = variants[0];
+  const referenceVariant = variants[1] ?? variants[0];
+  const checks = mode === "overlay"
+    ? (preferredVariant ? analyses[preferredVariant]?.checks : undefined) ?? result.checks
+    : result.checks;
 
   return <aside className="analyzer-targets" aria-label="Target Performance">
     <header>
@@ -138,11 +146,11 @@ function TargetPerformanceNavigator(props: TargetPerformanceNavigatorProps) {
       {TARGET_GROUPS.map(([category, label]) => <section className="analyzer-target-group" key={category}>
         <h3>{label}</h3>
         {checks.filter((check) => check.category === category).map((check) => {
-          const primary = analyses.primary?.checks.find((item) => item.id === check.id);
-          const baseline = analyses.baseline?.checks.find((item) => item.id === check.id);
-          const selectedCheck = mode === "compare" ? primary ?? baseline ?? check : check;
-          const delta = primary?.actual != null && baseline?.actual != null
-            ? primary.actual - baseline.actual
+          const preferred = preferredVariant ? analyses[preferredVariant]?.checks.find((item) => item.id === check.id) : undefined;
+          const reference = referenceVariant ? analyses[referenceVariant]?.checks.find((item) => item.id === check.id) : undefined;
+          const selectedCheck = mode === "overlay" ? preferred ?? reference ?? check : check;
+          const delta = preferred?.actual != null && reference?.actual != null
+            ? preferred.actual - reference.actual
             : null;
           return <button
             aria-label={check.label}
@@ -152,9 +160,9 @@ function TargetPerformanceNavigator(props: TargetPerformanceNavigatorProps) {
             type="button"
           >
             <span className="analyzer-target-label">{check.label}</span>
-            {mode === "compare" ? <span className="analyzer-target-compare-values">
-              <span><small>Primary</small><strong>{formattedValue(primary?.actual ?? null, check.unit)}</strong></span>
-              <span><small>Baseline</small><strong>{formattedValue(baseline?.actual ?? null, check.unit)}</strong></span>
+            {mode === "overlay" ? <span className="analyzer-target-compare-values">
+              <span><small>{preferredVariant ? displayVariant(preferredVariant) : "Variant 1"}</small><strong>{formattedValue(preferred?.actual ?? null, check.unit)}</strong></span>
+              <span><small>{referenceVariant ? displayVariant(referenceVariant) : "Variant 2"}</small><strong>{formattedValue(reference?.actual ?? null, check.unit)}</strong></span>
               <span><small>Δ</small><strong>{delta == null ? "—" : formattedValue(delta, check.unit)}</strong></span>
             </span> : <>
               <span className="analyzer-target-result">
@@ -175,7 +183,7 @@ export function RollHoldAnalyzerPanel(props: Props) {
   const [open, setOpen] = useState(false);
   const [response, setResponse] = useState<RollHoldAnalysisVariants | null>(null);
   const [telemetry, setTelemetry] = useState<Record<string, SignalResponse>>({});
-  const [mode, setMode] = useState<AnalyzerMode>("compare");
+  const [mode, setMode] = useState<AnalyzerMode>("overlay");
   const [error, setError] = useState<string | null>(null);
   const [selectedMetricId, setSelectedMetricId] = useState<string | null>(null);
 
@@ -196,8 +204,8 @@ export function RollHoldAnalyzerPanel(props: Props) {
 
   const analyses = response?.variants ?? {};
   const variants = Object.keys(analyses);
-  const activeVariants = mode === "compare" ? variants : variants.includes(mode) ? [mode] : variants.slice(0, 1);
-  const annotationVariant = activeVariants.includes("primary") ? "primary" : activeVariants[0];
+  const activeVariants = mode === "overlay" ? variants : variants.includes(mode) ? [mode] : variants.slice(0, 1);
+  const annotationVariant = activeVariants[0];
   const result = annotationVariant ? analyses[annotationVariant] : undefined;
   const diagnosticFocus = selectedMetricId ? ROLL_HOLD_DIAGNOSTICS[selectedMetricId] : undefined;
   const focused = useMemo(() => new Set(diagnosticFocus?.annotationIds ?? []), [diagnosticFocus]);
@@ -297,10 +305,11 @@ export function RollHoldAnalyzerPanel(props: Props) {
 
   const diagnosticSeries = (signal: string, command = false): ChartSeries[] => {
     const series = activeVariants.flatMap((variant) => {
-      const label = mode === "compare" ? `${variant} / ${signal.replaceAll("_", " ")}` : signal.replaceAll("_", " ");
-      return availableSeries([chartSeries(telemetry[variant], signal, label, command ? "#8abbff" : COLORS[variant] ?? "#c58af9", command)]);
+      const label = mode === "overlay" ? `${variant} / ${signal.replaceAll("_", " ")}` : signal.replaceAll("_", " ");
+      const color = VARIANT_COLORS[Math.max(0, variants.indexOf(variant)) % VARIANT_COLORS.length];
+      return availableSeries([chartSeries(telemetry[variant], signal, label, command ? "#8abbff" : color, command)]);
     });
-    if (command && mode === "compare" && series.length > 1) {
+    if (command && mode === "overlay" && series.length > 1) {
       const first = series[0];
       if (series.slice(1).every((item) => arraysEqual(first.values, item.values) && arraysEqual(first.time, item.time))) {
         return [{ ...first, name: signal.replaceAll("_", " ") }];
@@ -320,13 +329,12 @@ export function RollHoldAnalyzerPanel(props: Props) {
         {error && <Callout intent="warning">{error}</Callout>}
         {response && result && <div className="roll-hold-analyzer-content">
           <div className="analyzer-mode-switch" aria-label="Analyzer view"><span>View</span><ButtonGroup minimal>
-            <Button active={mode === "primary"} disabled={!variants.includes("primary")} onClick={() => setMode("primary")} small>Primary</Button>
-            <Button active={mode === "baseline"} disabled={!variants.includes("baseline")} onClick={() => setMode("baseline")} small>Baseline</Button>
-            <Button active={mode === "compare"} disabled={variants.length < 2} onClick={() => setMode("compare")} small>Compare</Button>
+            {variants.map((variant) => <Button active={mode === variant} key={variant} onClick={() => setMode(variant)} small>{displayVariant(variant)}</Button>)}
+            <Button active={mode === "overlay"} disabled={variants.length < 2} onClick={() => setMode("overlay")} small>Compare</Button>
           </ButtonGroup></div>
           <section className="analyzer-summary" aria-label="Roll Hold summary">
             <header><span>Summary</span>{onViewParameters && <Button icon={IconNames.PROPERTIES} minimal onClick={onViewParameters} small>Parameters</Button>}</header>
-            <dl>{SUMMARY_METRICS.map(([name, label]) => <div key={name}><dt>{label}</dt><dd>{activeVariants.map((variant) => `${mode === "compare" ? `${variant}: ` : ""}${metricValue(analyses[variant], name)}`).join(" · ")}</dd></div>)}</dl>
+            <dl>{SUMMARY_METRICS.map(([name, label]) => <div key={name}><dt>{label}</dt><dd>{activeVariants.map((variant) => `${mode === "overlay" ? `${variant}: ` : ""}${metricValue(analyses[variant], name)}`).join(" · ")}</dd></div>)}</dl>
             {activeVariants.flatMap((variant) => analyses[variant].missing_signals).length > 0 && <Callout compact intent="warning">Missing signals: {activeVariants.flatMap((variant) => analyses[variant].missing_signals.map((signal) => variants.length > 1 ? `${variant}/${signal}` : signal)).join(", ")}</Callout>}
           </section>
           <div className="roll-hold-analyzer-workspace">
@@ -347,7 +355,7 @@ export function RollHoldAnalyzerPanel(props: Props) {
                     {plotId === "roll_rate" && <TimeSeriesChart title="Roll Rate" unit="deg/s" series={[...diagnosticSeries("commanded_roll_rate", true), ...diagnosticSeries("roll_rate")]} annotations={rollRateAnnotations} fullTimeRange={fullTimeRange} timeline={timeline} onVisibleRangeChange={onVisibleRangeChange} onCursorTimeChange={onCursorTimeChange} />}
                     {plotId === "aileron" && <TimeSeriesChart title="Aileron" unit="normalized" series={diagnosticSeries("aileron")} annotations={aileronAnnotations} fullTimeRange={fullTimeRange} timeline={timeline} onVisibleRangeChange={onVisibleRangeChange} onCursorTimeChange={onCursorTimeChange} />}
                   </div>)}</div>
-                  <section className="analyzer-assessment" aria-label="Roll Hold assessment"><header>Assessment</header><div>{activeVariants.flatMap((variant) => analyses[variant].assessment.map((item) => <div key={`${variant}-${item.code}`}><Tag minimal intent={item.severity === "warning" ? "warning" : item.severity === "success" ? "success" : "none"}>{mode === "compare" ? variant : item.severity}</Tag><span>{item.message}</span></div>))}</div></section>
+                  <section className="analyzer-assessment" aria-label="Roll Hold assessment"><header>Assessment</header><div>{activeVariants.flatMap((variant) => analyses[variant].assessment.map((item) => <div key={`${variant}-${item.code}`}><Tag minimal intent={item.severity === "warning" ? "warning" : item.severity === "success" ? "success" : "none"}>{mode === "overlay" ? variant : item.severity}</Tag><span>{item.message}</span></div>))}</div></section>
                 </div>
               </section>
             </div>

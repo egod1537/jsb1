@@ -1,6 +1,7 @@
-import { signalDefinitionForId } from "./signalCatalog";
+import type { SignalMetadata } from "../../types/api";
+import { normalizeSignalMetadata, signalDefinitionForId } from "./signalCatalog";
 
-/** Presentation-only labels for canonical JSB0 signal names. */
-export function formatSignalName(name: string): string {
-  return signalDefinitionForId(name).displayName;
+/** Presentation label supplied by the Runtime catalog, with a neutral fallback. */
+export function formatSignalName(name: string, metadata?: SignalMetadata): string {
+  return metadata ? normalizeSignalMetadata(metadata).displayName : signalDefinitionForId(name).displayName;
 }

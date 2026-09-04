@@ -7,7 +7,7 @@ from pathlib import Path
 from app.analysis.mcap_reader import McapRunReader
 from app.analysis.roll_hold import compute_roll_hold_metrics
 from app.domain.models import Metric
-
+from app.domain.telemetry import RuntimeSignalCatalog
 
 REQUIRED_METRIC_CHANNELS = ["commanded_roll", "roll", "aileron"]
 
@@ -31,13 +31,20 @@ class RunTelemetryProcessor:
         existing_metrics_path: Path,
         *,
         variants: list[str] | None = None,
+        signal_catalog: RuntimeSignalCatalog | None = None,
+        descriptor: bytes | None = None,
     ) -> TelemetryProcessingResult:
-        selected_variants = variants or self.reader.variants(telemetry_path) or [""]
+        dataset = self.reader.dataset(
+            telemetry_path,
+            signal_catalog=signal_catalog,
+            descriptor=descriptor,
+            variants=tuple(variants or ()),
+        )
+        selected_variants = variants or list(dataset.variants()) or [""]
         metrics_by_variant: dict[str, list[Metric]] = {}
         durations: list[float] = []
         for variant in selected_variants:
-            timeline, series = self.reader.read_aligned(
-                telemetry_path,
+            timeline, series = dataset.align(
                 REQUIRED_METRIC_CHANNELS,
                 variant=variant or None,
             )
@@ -48,7 +55,7 @@ class RunTelemetryProcessor:
                 series["aileron"],
             )
             durations.append(float(timeline[-1] - timeline[0]))
-        preferred = "primary" if "primary" in metrics_by_variant else selected_variants[0]
+        preferred = selected_variants[0]
         metrics = metrics_by_variant[preferred]
         previous = self._read_existing_metrics(existing_metrics_path)
         payload: dict[str, object] = {

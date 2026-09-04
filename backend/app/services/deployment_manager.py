@@ -1,75 +1,47 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 import logging
-import os
-import re
-import ssl
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
+from app.config.deployment import DeploymentConfigurationValidator
 from app.config.settings import PROJECT_ROOT, Settings
 from app.domain.deployment import BranchDeployment, DeploymentStatus
-from app.repositories.deployments import (
-    DeploymentRepository,
+from app.domain.errors import (
+    DeploymentConfigurationError,
+    DeploymentOperationError,
     InvalidDeploymentTransition,
 )
-from app.services.repository_manager import RepositoryManager
-from app.infrastructure.deployment.verifier import (
-    DeploymentVerificationError,
-    DeploymentVerifier,
+from app.infrastructure.deployment import (
+    DeploymentFileStore,
+    DeploymentRuntimeAdapter,
+    ProcessCommandRunner,
 )
-from app.infrastructure.deployment import ProcessCommandRunner
+from app.infrastructure.deployment import (
+    validate_tls_paths as validate_deployment_tls_paths,
+)
+from app.infrastructure.deployment.verifier import DeploymentVerifier
 from app.infrastructure.filesystem import AtomicFileStore
-
-
-class DeploymentOperationError(RuntimeError):
-    pass
-
-
-class DeploymentConfigurationError(DeploymentOperationError):
-    pass
-
+from app.repositories.deployments import DeploymentRepository
+from app.services.deployment_planner import (
+    DeploymentPlanner,
+    branch_slug,
+    deployment_hostname,
+)
+from app.services.repository_manager import RepositoryManager
 
 CommandRunner = Callable[[list[str], Path | None, float], None]
 LOGGER = logging.getLogger(__name__)
 
-
-def branch_slug(branch: str, *, max_length: int = 48) -> str:
-    """Return a conservative DNS label; collision handling belongs to the manager."""
-    value = re.sub(r"[^a-z0-9-]+", "-", branch.lower())
-    value = re.sub(r"-+", "-", value).strip("-")
-    value = value[:max_length].rstrip("-")
-    if not value:
-        raise DeploymentOperationError("branch does not produce a valid deployment slug")
-    return value
-
-
-def deployment_hostname(
-    slug: str,
-    *,
-    branch: str,
-    base_domain: str,
-    main_branch: str = "main",
-    main_hostname: str | None = None,
-) -> str:
-    if branch == main_branch:
-        return main_hostname or f"jsb.{base_domain}"
-    return f"{slug}-jsb.{base_domain}"
-
-
-def _dns_pattern_matches(pattern: str, hostname: str) -> bool:
-    pattern = pattern.lower().rstrip(".")
-    hostname = hostname.lower().rstrip(".")
-    if pattern == hostname:
-        return True
-    if not pattern.startswith("*."):
-        return False
-    suffix = pattern[2:]
-    return hostname.endswith(f".{suffix}") and hostname.count(".") == suffix.count(".") + 1
+__all__ = [
+    "DeploymentConfigurationError",
+    "DeploymentManager",
+    "DeploymentOperationError",
+    "branch_slug",
+    "deployment_hostname",
+    "validate_tls_paths",
+]
 
 
 def validate_tls_paths(
@@ -80,50 +52,22 @@ def validate_tls_paths(
     main_hostname: str | None = None,
     repository_root: Path = PROJECT_ROOT,
 ) -> tuple[str, ...]:
-    if cert_path is None or key_path is None:
-        raise DeploymentConfigurationError(
-            "JSB1_TLS_CERT_PATH and JSB1_TLS_KEY_PATH must both be configured"
-        )
-    cert = cert_path.expanduser().resolve()
-    key = key_path.expanduser().resolve()
-    for path, label in ((cert, "certificate"), (key, "private key")):
-        if not path.is_file():
-            raise DeploymentConfigurationError(f"TLS {label} path does not exist")
-        if not os.access(path, os.R_OK):
-            raise DeploymentConfigurationError(f"TLS {label} path is not readable")
-        try:
-            path.relative_to(repository_root.resolve())
-        except ValueError:
-            pass
-        else:
-            raise DeploymentConfigurationError(
-                f"TLS {label} must remain outside the repository"
-            )
-    if key.stat().st_mode & 0o004:
-        raise DeploymentConfigurationError("TLS private key must not be world-readable")
-    try:
-        decoded: dict[str, Any] = ssl._ssl._test_decode_cert(str(cert))  # type: ignore[attr-defined]
-    except (OSError, ssl.SSLError, ValueError) as exc:
-        raise DeploymentConfigurationError("TLS certificate is not a readable X.509 certificate") from exc
-    sans = tuple(
-        str(value).lower().rstrip(".")
-        for kind, value in decoded.get("subjectAltName", ())
-        if kind == "DNS"
+    return validate_deployment_tls_paths(
+        cert_path,
+        key_path,
+        base_domain=base_domain,
+        main_hostname=main_hostname,
+        repository_root=repository_root,
     )
-    main_hostname = main_hostname or f"jsb.{base_domain}"
-    preview_hostname = f"preview.{base_domain}"
-    if not any(_dns_pattern_matches(item, main_hostname) for item in sans):
-        raise DeploymentConfigurationError(
-            f"TLS certificate does not cover {main_hostname}"
-        )
-    if not any(_dns_pattern_matches(item, preview_hostname) for item in sans):
-        raise DeploymentConfigurationError(
-            f"TLS certificate does not cover *.{base_domain}"
-        )
-    return sans
 
 
 class DeploymentManager:
+    """Persist and orchestrate the legacy controller deployment lifecycle.
+
+    Host deployments and GitHub reporting are owned by deploy.sh; this manager
+    intentionally never reads or writes the shell deployment unit state.
+    """
+
     def __init__(
         self,
         deployments: DeploymentRepository,
@@ -133,21 +77,40 @@ class DeploymentManager:
         command_runner: CommandRunner | None = None,
         verifier: DeploymentVerifier | None = None,
         files: AtomicFileStore | None = None,
+        deployment_files: DeploymentFileStore | None = None,
     ) -> None:
         self.deployments = deployments
         self.repositories = repositories
         self.settings = settings
-        self.deployment_root = settings.resolved_deployment_root.resolve()
-        self.fragments_dir = settings.resolved_caddy_fragments_dir.resolve()
-        self.caddy_config = settings.resolved_caddy_config_path.resolve()
-        self.deployment_root.mkdir(parents=True, exist_ok=True)
-        self.fragments_dir.mkdir(parents=True, exist_ok=True)
+        self.deployment_files = deployment_files or DeploymentFileStore(
+            settings.resolved_deployment_root,
+            settings.resolved_caddy_fragments_dir,
+            settings.resolved_caddy_config_path,
+            files,
+        )
+        self.deployment_root = self.deployment_files.deployment_root
+        self.fragments_dir = self.deployment_files.fragments_dir
+        self.caddy_config = self.deployment_files.caddy_config
         self._command_runner = command_runner or ProcessCommandRunner()
         self.verifier = verifier or DeploymentVerifier(settings)
-        self.files = files or AtomicFileStore()
+        self.files = self.deployment_files.files
+        self.configuration = DeploymentConfigurationValidator(settings)
+        self.planner = DeploymentPlanner(settings)
+        self.runtime = DeploymentRuntimeAdapter(
+            settings,
+            self.deployment_files,
+            self._command_runner,
+            self.verifier,
+            repositories.worktree_root,
+        )
         self._locks_guard = asyncio.Lock()
         self._locks: dict[tuple[int, str], asyncio.Lock] = {}
         self._tasks: set[asyncio.Task[None]] = set()
+
+    def list(
+        self, *, repository_id: int | None = None, limit: int = 200
+    ) -> list[BranchDeployment]:
+        return self.deployments.list(repository_id=repository_id, limit=limit)
 
     async def request_deploy(self, repository_id: int, branch: str) -> BranchDeployment:
         self.repositories.validate_branch_name(branch)
@@ -161,23 +124,25 @@ class DeploymentManager:
             if active is not None:
                 if active.commit_sha == revision.commit_sha:
                     return active
-                if active.status in (DeploymentStatus.QUEUED, DeploymentStatus.STARTING):
-                    raise DeploymentOperationError("a deployment update is already in progress")
+                if active.status in (
+                    DeploymentStatus.QUEUED,
+                    DeploymentStatus.STARTING,
+                ):
+                    raise DeploymentOperationError(
+                        "a deployment update is already in progress"
+                    )
             worktree = await asyncio.to_thread(
                 self.repositories.prepare_worktree, repository_id, revision.commit_sha
             )
             previous = self.deployments.latest_for_branch(repository_id, branch)
-            slug = self._slug_for(
-                repository_id, branch, revision.commit_sha, previous
-            )
-            hostname = deployment_hostname(
-                slug,
+            plan = self.planner.plan(
+                repository_id=repository_id,
                 branch=branch,
-                base_domain=self.settings.deployment_base_domain,
-                main_branch=self.settings.deployment_main_branch,
-                main_hostname=self.settings.deployment_main_hostname,
+                commit_sha=revision.commit_sha,
+                previous=previous,
+                slug_owner=self.deployments.slug_owner,
             )
-            route_owner = self.deployments.active_for_hostname(hostname)
+            route_owner = self.deployments.active_for_hostname(plan.hostname)
             if route_owner is not None and not (
                 route_owner.repository_id == repository_id
                 and route_owner.branch == branch
@@ -189,8 +154,8 @@ class DeploymentManager:
                 repository_id=repository_id,
                 branch=branch,
                 commit_sha=revision.commit_sha,
-                slug=slug,
-                hostname=hostname,
+                slug=plan.slug,
+                hostname=plan.hostname,
                 worktree_path=str(worktree),
             )
 
@@ -208,10 +173,14 @@ class DeploymentManager:
             task.add_done_callback(self._tasks.discard)
         return deployment
 
+    async def redeploy(self, deployment_id: int) -> BranchDeployment:
+        current = self.status(deployment_id)
+        return await self.submit(current.repository_id, current.branch)
+
     async def _background_start(self, deployment_id: int) -> None:
         try:
             await self.start(deployment_id)
-        except Exception:
+        except Exception:  # noqa: BLE001 - start records the background failure
             # start() records a safe error message for API/UI inspection.
             return
 
@@ -247,9 +216,7 @@ class DeploymentManager:
                 )
                 compose_started = True
                 await self._wait_for_http(deployment)
-                fragment_path = self._fragment_path(deployment.slug)
-                if fragment_path.is_file():
-                    route_backup = fragment_path.read_text(encoding="utf-8")
+                route_backup = self.runtime.read_caddy_fragment(deployment.slug)
                 self._write_caddy_fragment(deployment)
                 route_written = True
                 await self._reload_caddy()
@@ -262,7 +229,7 @@ class DeploymentManager:
                 if previous is not None and previous.id != deployment.id:
                     try:
                         await self._stop_runtime(previous, remove_route=False)
-                    except Exception as cleanup_error:
+                    except Exception as cleanup_error:  # noqa: BLE001 - replacement is live
                         LOGGER.warning(
                             "replacement deployment %s is running but old deployment %s cleanup failed: %s",
                             deployment.id,
@@ -272,20 +239,15 @@ class DeploymentManager:
                 return running
             except Exception as exc:
                 if route_written:
-                    if route_backup is None:
-                        self._remove_caddy_fragment(deployment.slug)
-                    else:
-                        self.files.write_text(
-                            self._fragment_path(deployment.slug), route_backup
-                        )
+                    self.runtime.restore_caddy_fragment(deployment.slug, route_backup)
                     try:
                         await self._reload_caddy()
-                    except Exception:
+                    except Exception:  # noqa: BLE001, S110 - best-effort rollback
                         pass
                 if compose_started or deployment.status is DeploymentStatus.STARTING:
                     try:
                         await self._compose_down(deployment)
-                    except Exception:
+                    except Exception:  # noqa: BLE001, S110 - best-effort rollback
                         pass
                 message = self._safe_error(exc)
                 try:
@@ -325,11 +287,11 @@ class DeploymentManager:
                 self._remove_caddy_fragment(deployment.slug)
                 try:
                     await self._reload_caddy()
-                except Exception:
+                except Exception:  # noqa: BLE001, S110 - best-effort rollback
                     pass
                 try:
                     await self._compose_down(deployment)
-                except Exception:
+                except Exception:  # noqa: BLE001, S110 - best-effort rollback
                     pass
                 message = self._safe_error(exc)
                 self.deployments.transition(
@@ -340,7 +302,9 @@ class DeploymentManager:
                 )
                 raise DeploymentOperationError(message) from exc
 
-    async def stop(self, deployment_id: int, *, force: bool = False) -> BranchDeployment:
+    async def stop(
+        self, deployment_id: int, *, force: bool = False
+    ) -> BranchDeployment:
         deployment = self.deployments.get(deployment_id)
         if deployment.branch == self.settings.deployment_main_branch and not force:
             raise DeploymentOperationError("stopping main requires force=true")
@@ -404,219 +368,53 @@ class DeploymentManager:
         commit_sha: str,
         active: BranchDeployment | None,
     ) -> str:
-        if branch == self.settings.deployment_main_branch:
-            return "main"
-        if active is not None:
-            return active.slug
-        base = branch_slug(branch)
-        main_suffix = f".{self.settings.deployment_base_domain}"
-        main_label = self.settings.deployment_main_hostname.removesuffix(main_suffix)
-        owner = self.deployments.slug_owner(
-            base, repository_id=repository_id, branch=branch
+        return self.planner.slug_for(
+            repository_id=repository_id,
+            branch=branch,
+            commit_sha=commit_sha,
+            previous=active,
+            slug_owner=self.deployments.slug_owner,
         )
-        if owner is None and base not in {"main", main_label}:
-            return base
-        candidate = f"{base[:55].rstrip('-')}-{commit_sha[:7].lower()}"
-        owner = self.deployments.slug_owner(
-            candidate, repository_id=repository_id, branch=branch
-        )
-        if owner is None:
-            return candidate
-        digest = hashlib.sha256(branch.encode("utf-8")).hexdigest()[:6]
-        return f"{base[:48].rstrip('-')}-{commit_sha[:7].lower()}-{digest}"
 
     def _validate_configuration(self) -> None:
-        domain = self.settings.deployment_base_domain.lower().rstrip(".")
-        main_hostname = self.settings.deployment_main_hostname.lower().rstrip(".")
-        if not re.fullmatch(
-            r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
-            domain,
-        ):
-            raise DeploymentConfigurationError("invalid JSB1_DEPLOYMENT_BASE_DOMAIN")
-        if not re.fullmatch(
-            r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\." + re.escape(domain),
-            main_hostname,
-        ):
-            raise DeploymentConfigurationError(
-                "JSB1_DEPLOYMENT_MAIN_HOSTNAME must be exactly one label beneath the base domain"
-            )
-        if self.settings.deployment_port_start >= self.settings.deployment_port_end:
-            raise DeploymentConfigurationError(
-                "JSB1_DEPLOYMENT_PORT_START must be lower than JSB1_DEPLOYMENT_PORT_END"
-            )
-        for value, name in (
-            (self.settings.deployment_health_host, "JSB1_DEPLOYMENT_HEALTH_HOST"),
-            (
-                self.settings.deployment_port_probe_host,
-                "JSB1_DEPLOYMENT_PORT_PROBE_HOST",
-            ),
-            (self.settings.caddy_upstream_host, "JSB1_CADDY_UPSTREAM_HOST"),
-            (self.settings.caddy_health_host, "JSB1_CADDY_HEALTH_HOST"),
-        ):
-            if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?", value):
-                raise DeploymentConfigurationError(f"invalid {name}")
-        if self.settings.caddy_container is not None and not re.fullmatch(
-            r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", self.settings.caddy_container
-        ):
-            raise DeploymentConfigurationError("invalid JSB1_CADDY_CONTAINER")
-        validate_tls_paths(
-            self.settings.tls_cert_path,
-            self.settings.tls_key_path,
-            base_domain=domain,
-            main_hostname=main_hostname,
-        )
+        self.configuration.validate()
         self._ensure_caddy_config()
 
     def _ensure_caddy_config(self) -> None:
-        self.caddy_config.parent.mkdir(parents=True, exist_ok=True)
-        if self.caddy_config.exists():
-            return
-        content = (
-            "{\n"
-            "\tadmin 127.0.0.1:2019\n"
-            "}\n\n"
-            f"import {self.fragments_dir}/*.caddy\n"
-        )
-        self.files.write_text(self.caddy_config, content)
-        self.files.write_text(self.fragments_dir / "_empty.caddy", "\n")
+        self.runtime.ensure_caddy_config()
 
     def _write_compose_override(self, deployment: BranchDeployment) -> Path:
-        if deployment.frontend_port is None or deployment.backend_port is None:
-            raise DeploymentOperationError("deployment ports have not been allocated")
-        directory = self._deployment_dir(deployment)
-        directory.mkdir(parents=True, exist_ok=True)
-        content = f"""services:
-  backend:
-    environment:
-      JSB1_DATA_DIR: /data
-      JSB1_DATABASE_PATH: /data/jsb1.db
-      JSB1_REPOSITORY_ROOT: /data/repositories
-      JSB1_WORKTREE_ROOT: /data/worktrees
-      JSB1_BUILD_ROOT: /data/builds
-    ports:
-      - {json.dumps(f'127.0.0.1:{deployment.backend_port}:8000')}
-    volumes:
-      - deployment-data:/data
-  web:
-    ports: !override
-      - {json.dumps(f'127.0.0.1:{deployment.frontend_port}:8080')}
-  tunnel:
-    profiles: [manual-tunnel]
-
-volumes:
-  deployment-data:
-"""
-        path = directory / "compose.override.yaml"
-        self.files.write_text(path, content)
-        return path
+        return self.runtime.write_compose_override(deployment)
 
     def _write_caddy_fragment(self, deployment: BranchDeployment) -> Path:
-        if deployment.frontend_port is None:
-            raise DeploymentOperationError("deployment frontend port is not allocated")
-        cert = str(self.settings.tls_cert_path.expanduser().resolve())  # type: ignore[union-attr]
-        key = str(self.settings.tls_key_path.expanduser().resolve())  # type: ignore[union-attr]
-        content = (
-            f"{deployment.hostname} {{\n"
-            f"\ttls {json.dumps(cert)} {json.dumps(key)}\n"
-            f"\treverse_proxy {self.settings.caddy_upstream_host}:{deployment.frontend_port}\n"
-            "}\n"
-        )
-        path = self._fragment_path(deployment.slug)
-        self.files.write_text(path, content)
-        return path
+        return self.runtime.write_caddy_fragment(deployment)
 
     async def _reload_caddy(self) -> None:
-        prefix: list[str] = []
-        if self.settings.caddy_container is not None:
-            prefix = [
-                self.settings.docker_binary,
-                "exec",
-                self.settings.caddy_container,
-            ]
-        await asyncio.to_thread(
-            self._command_runner,
-            [*prefix,
-                self.settings.caddy_binary,
-                "validate",
-                "--config",
-                str(self.caddy_config),
-                "--adapter",
-                "caddyfile",
-            ],
-            None,
-            30.0,
-        )
-        await asyncio.to_thread(
-            self._command_runner,
-            [*prefix,
-                self.settings.caddy_binary,
-                "reload",
-                "--config",
-                str(self.caddy_config),
-                "--adapter",
-                "caddyfile",
-            ],
-            None,
-            30.0,
-        )
+        await self.runtime.reload_caddy()
 
     async def _compose(
         self, deployment: BranchDeployment, args: list[str], override: Path
     ) -> None:
-        worktree = self._worktree(deployment)
-        base = worktree / "compose.yaml"
-        if not base.is_file():
-            raise DeploymentOperationError("deployment revision has no compose.yaml")
-        command = [
-            self.settings.docker_binary,
-            "compose",
-            "-p",
-            deployment.compose_project,
-            "-f",
-            str(base),
-            "-f",
-            str(override),
-            *args,
-        ]
-        await asyncio.to_thread(
-            self._command_runner,
-            command,
-            worktree,
-            self.settings.deployment_command_timeout_sec,
-        )
+        await self.runtime.compose(deployment, args, override)
 
     async def _compose_down(self, deployment: BranchDeployment) -> None:
-        override = self._override_path(deployment)
-        if not override.is_file():
-            return
-        await self._compose(
-            deployment,
-            ["down", "--remove-orphans"],
-            override,
-        )
+        await self.runtime.compose_down(deployment)
 
     async def _wait_for_http(self, deployment: BranchDeployment) -> None:
-        try:
-            await self.verifier.wait_for_http(deployment)
-        except DeploymentVerificationError as exc:
-            raise DeploymentOperationError(str(exc)) from exc
+        await self.runtime.wait_for_http(deployment)
 
     async def _wait_for_https(self, hostname: str) -> None:
-        try:
-            await self.verifier.wait_for_https(hostname)
-        except DeploymentVerificationError as exc:
-            raise DeploymentOperationError(str(exc)) from exc
+        await self.runtime.wait_for_https(hostname)
 
     def _assert_ports_free(self, deployment: BranchDeployment) -> None:
-        try:
-            self.verifier.assert_ports_free(deployment)
-        except DeploymentVerificationError as exc:
-            raise DeploymentOperationError(str(exc)) from exc
+        self.runtime.assert_ports_free(deployment)
 
     def _occupied_ports(self) -> set[int]:
-        return self.verifier.occupied_ports()
+        return self.runtime.occupied_ports()
 
-    def _previous_running(self, deployment: BranchDeployment) -> BranchDeployment | None:
+    def _previous_running(
+        self, deployment: BranchDeployment
+    ) -> BranchDeployment | None:
         for item in self.deployments.list(repository_id=deployment.repository_id):
             if (
                 item.id != deployment.id
@@ -632,31 +430,19 @@ volumes:
             return self._locks.setdefault(key, asyncio.Lock())
 
     def _deployment_dir(self, deployment: BranchDeployment) -> Path:
-        candidate = (self.deployment_root / str(deployment.id)).resolve()
-        try:
-            candidate.relative_to(self.deployment_root)
-        except ValueError as exc:
-            raise DeploymentOperationError("deployment directory escapes configured root") from exc
-        return candidate
+        return self.runtime.deployment_dir(deployment)
 
     def _worktree(self, deployment: BranchDeployment) -> Path:
-        candidate = Path(deployment.worktree_path).resolve()
-        try:
-            candidate.relative_to(self.repositories.worktree_root)
-        except ValueError as exc:
-            raise DeploymentOperationError("deployment worktree escapes configured root") from exc
-        return candidate
+        return self.runtime.worktree(deployment)
 
     def _override_path(self, deployment: BranchDeployment) -> Path:
-        return self._deployment_dir(deployment) / "compose.override.yaml"
+        return self.runtime.override_path(deployment)
 
     def _fragment_path(self, slug: str) -> Path:
-        if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", slug):
-            raise DeploymentOperationError("invalid deployment slug")
-        return self.fragments_dir / f"{slug}.caddy"
+        return self.runtime.fragment_path(slug)
 
     def _remove_caddy_fragment(self, slug: str) -> None:
-        self._fragment_path(slug).unlink(missing_ok=True)
+        self.runtime.remove_caddy_fragment(slug)
 
     @staticmethod
     def _safe_error(exc: Exception) -> str:

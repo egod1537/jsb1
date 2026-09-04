@@ -12,28 +12,38 @@ from app.repositories.jsb_repository_repository import JsbRepositoryRepository
 from app.repositories.runs import RunRepository
 from app.services.artifacts import ArtifactService
 from app.services.build_manager import BuildManager
+from app.services.build_requests import BuildRequestService
+from app.services.comparison_creation import ComparisonCreationService
+from app.services.comparison_queries import ComparisonQueryService
+from app.services.controller_parameters import RuntimeControllerParameterService
 from app.services.deployment_manager import DeploymentManager
+from app.services.health import HealthService
+from app.services.ports import BuildDispatcher, RunDispatcher
 from app.services.repository_manager import RepositoryManager
-from app.services.scenario_sync import (
-    ScenarioCompatibilityResolver,
-    ScenarioSyncService,
-)
+from app.services.run_analysis import RunAnalysisService
+from app.services.run_creation import RunCreationService
+from app.services.run_deletion import RunDeletionService
+from app.services.run_queries import RunQueryService
+from app.services.runtime_variants import RuntimeVariantService
 from app.services.scenario_inspection import ScenarioInspectionService
+from app.services.scenario_inspection_use_cases import ScenarioInspectionUseCases
+from app.services.scenario_snapshot_queries import ScenarioSnapshotQueryService
+from app.services.scenario_sync import (
+    ScenarioSyncService,
+    StableScenarioContractResolver,
+)
 from app.services.scenario_validator import ScenarioValidator
 from app.services.scenario_writes import ScenarioWriteService
 from app.services.scenarios import ScenarioService
-from app.services.runtime_variants import RuntimeVariantService
-from app.services.run_creation import RunCreationService
-from app.services.run_analysis import RunAnalysisService
-from app.services.run_deletion import RunDeletionService
-from app.services.comparison_creation import ComparisonCreationService
-from app.services.controller_parameters import RuntimeControllerParameterService
 from app.services.telemetry_queries import TelemetryQueryService
-from app.workers.dispatch import BuildDispatcher, RunDispatcher
 
 
 def get_database(request: Request) -> Database:
     return request.app.state.database
+
+
+def get_health(request: Request) -> HealthService:
+    return request.app.state.health
 
 
 def get_repository(request: Request) -> RunRepository:
@@ -58,6 +68,10 @@ def get_builds(request: Request) -> BuildRepository:
 
 def get_build_manager(request: Request) -> BuildManager:
     return request.app.state.build_manager
+
+
+def get_build_requests(request: Request) -> BuildRequestService:
+    return request.app.state.build_requests
 
 
 def get_build_scheduler(request: Request) -> BuildDispatcher:
@@ -100,15 +114,27 @@ def get_run_deletion(request: Request) -> RunDeletionService:
     return request.app.state.run_deletion
 
 
+def get_run_queries(request: Request) -> RunQueryService:
+    return request.app.state.run_queries
+
+
 def get_comparison_creation(request: Request) -> ComparisonCreationService:
     return request.app.state.comparison_creation
+
+
+def get_comparison_queries(request: Request) -> ComparisonQueryService:
+    return request.app.state.comparison_queries
+
+
+def get_scenario_snapshot_queries(request: Request) -> ScenarioSnapshotQueryService:
+    return request.app.state.scenario_snapshot_queries
 
 
 def get_scenario_validator(request: Request) -> ScenarioValidator:
     return request.app.state.scenario_validator
 
 
-def get_scenario_compatibility(request: Request) -> ScenarioCompatibilityResolver:
+def get_scenario_compatibility(request: Request) -> StableScenarioContractResolver:
     return request.app.state.scenario_compatibility
 
 
@@ -122,6 +148,18 @@ def get_scenario_writer(request: Request) -> ScenarioWriteService:
 
 def get_scenario_inspector(request: Request) -> ScenarioInspectionService:
     return request.app.state.scenario_inspector
+
+
+def get_scenario_inspection_use_cases(request: Request) -> ScenarioInspectionUseCases:
+    # Assemble from current state so test/operator overrides of scenario
+    # compatibility remain effective for each request.
+    return ScenarioInspectionUseCases(
+        request.app.state.scenario_inspector,
+        request.app.state.scenario_compatibility,
+        request.app.state.scenario_validator,
+        request.app.state.repository_manager,
+        request.app.state.scenario_snapshot_queries,
+    )
 
 
 def get_scheduler(request: Request) -> RunDispatcher:

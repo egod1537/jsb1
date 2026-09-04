@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
+from app.domain.telemetry import RuntimeSignalDefinition
+
 
 @dataclass(frozen=True)
 class SignalDefinition:
@@ -33,7 +35,7 @@ RAD_TO_DEG = 180.0 / np.pi
 
 # JSB0 Runtime contract 2.0 catalog/telemetry RollControlState coverage.
 # Additions belong here only after the Runtime contract publishes them.
-SIGNAL_CATALOG: dict[str, SignalDefinition] = {
+LEGACY_SIGNAL_CATALOG: dict[str, SignalDefinition] = {
     "commanded_roll": SignalDefinition(
         id="commanded_roll",
         display_name="Commanded Roll",
@@ -114,5 +116,30 @@ SIGNAL_CATALOG: dict[str, SignalDefinition] = {
 
 
 def signal_definition(signal_id: str) -> SignalDefinition | None:
-    return SIGNAL_CATALOG.get(signal_id)
+    return LEGACY_SIGNAL_CATALOG.get(signal_id)
 
+
+# Import compatibility for callers that explicitly exercise the pre-index
+# presentation adapter.
+SIGNAL_CATALOG = LEGACY_SIGNAL_CATALOG
+
+
+def contract_signal_definition(item: RuntimeSignalDefinition) -> SignalDefinition:
+    """Derive JSB1 presentation from contract semantics without signal tables."""
+    scale = RAD_TO_DEG if item.unit in {"rad", "rad/s"} else 1.0
+    unit = {"rad": "deg", "rad/s": "deg/s"}.get(item.unit, item.unit)
+    group = (item.group or item.id.rsplit(".", 1)[0]).split(".")
+    category = group[0].replace("_", " ").title()
+    subcategory = " ".join(group[1:]).replace("_", " ").title() or "General"
+    display_name = item.api_id.replace("_", " ").title()
+    return SignalDefinition(
+        id=item.api_id,
+        display_name=display_name,
+        symbol="",
+        symbol_latex="",
+        unit=unit,
+        category=category,
+        subcategory=subcategory,
+        source_unit=item.unit,
+        scale=scale,
+    )

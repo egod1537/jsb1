@@ -4,13 +4,11 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
-from app.api.dependencies import get_deployment_manager, get_deployments
+from app.api.dependencies import get_deployment_manager
 from app.domain.deployment import BranchDeployment, DeploymentCreate
-from app.repositories.deployments import (
+from app.domain.errors import (
     DeploymentConflict,
-    DeploymentRepository,
     InvalidDeploymentTransition,
-    NoDeploymentPortAvailable,
 )
 from app.services.deployment_manager import (
     DeploymentConfigurationError,
@@ -18,7 +16,6 @@ from app.services.deployment_manager import (
     DeploymentOperationError,
 )
 from app.services.repository_manager import GitOperationError, InvalidRepositoryPath
-
 
 router = APIRouter(prefix="/deployments", tags=["deployments"])
 
@@ -35,11 +32,11 @@ def _deployment_error(exc: Exception) -> HTTPException:
 
 @router.get("", response_model=list[BranchDeployment])
 def list_deployments(
-    deployments: Annotated[DeploymentRepository, Depends(get_deployments)],
+    manager: Annotated[DeploymentManager, Depends(get_deployment_manager)],
     repository_id: int | None = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
 ) -> list[BranchDeployment]:
-    return deployments.list(repository_id=repository_id, limit=limit)
+    return manager.list(repository_id=repository_id, limit=limit)
 
 
 @router.post("", response_model=BranchDeployment, status_code=202)
@@ -76,8 +73,7 @@ async def redeploy(
     manager: Annotated[DeploymentManager, Depends(get_deployment_manager)],
 ) -> BranchDeployment:
     try:
-        current = manager.status(deployment_id)
-        return await manager.submit(current.repository_id, current.branch)
+        return await manager.redeploy(deployment_id)
     except (
         KeyError,
         GitOperationError,

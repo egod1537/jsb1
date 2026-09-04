@@ -60,7 +60,7 @@ export function PlotPanel({
       ? resolveSignal(signal.name, telemetry, plot.presentationVariant)
       : telemetry.series[signal.name] ? [{
         key: signal.name,
-        name: formatSignalName(signal.name),
+        name: formatSignalName(signal.name, availableSignals.find((item) => item.name === signal.name)),
         time: telemetry.time,
         values: telemetry.series[signal.name],
         unit: telemetry.units[signal.name],
@@ -72,7 +72,7 @@ export function PlotPanel({
       color: signalColor(item.key),
       dashed: signal.name.startsWith("commanded_"),
     }));
-  }), [plot.presentationVariant, plot.signals, resolveSignal, telemetry]);
+  }), [availableSignals, plot.presentationVariant, plot.signals, resolveSignal, telemetry]);
   const fullTimeRange = useMemo<[number, number] | undefined>(() => telemetry && telemetry.time.length > 0
     ? [telemetry.time[0], telemetry.time[telemetry.time.length - 1]]
     : undefined, [telemetry]);

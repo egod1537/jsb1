@@ -6,12 +6,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
+from app.domain.scenario_validation import ScenarioValidationPolicy
+from app.infrastructure.git import GitOperationError, GitRepositoryAdapter
 from app.services.scenario_validator import (
     ScenarioValidationUnavailable,
     ScenarioValidator,
 )
 from app.services.scenarios import ScenarioService
-from app.infrastructure.git import GitOperationError, GitRepositoryAdapter
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,18 @@ def _runtime_commit(runtime_root: Path) -> str:
         return "unknown"
 
 
+def _runtime_branch(runtime_root: Path) -> str:
+    try:
+        branch = GitRepositoryAdapter().git(
+            runtime_root,
+            ["branch", "--show-current"],
+            operation="resolve validation runtime branch",
+        )
+        return branch or "detached"
+    except GitOperationError:
+        return "unknown"
+
+
 def validate_directory(
     scenario_dir: Path,
     runtime_root: Path,
@@ -53,6 +66,7 @@ def validate_directory(
     service = ScenarioService(scenario_dir)
     scenarios = service.list()
     runtime_commit = _runtime_commit(runtime_root)
+    runtime_branch = _runtime_branch(runtime_root)
 
     if not scenarios:
         print(f"FAIL {_display_path(scenario_dir)}", file=output)
@@ -82,8 +96,9 @@ def validate_directory(
         result = scenario_validator.validate_file(
             path,
             contract,
-            runtime_branch="main",
+            runtime_branch=runtime_branch,
             runtime_commit=runtime_commit,
+            policy=ScenarioValidationPolicy.CATALOG_STABLE,
         )
         errors: list[str] = []
         for error in result.errors:
@@ -116,7 +131,7 @@ def validate_directory(
     print(f"Failed: {failed}", file=output)
     if not failed:
         print(
-            f"Validated {len(scenarios)} scenarios against JSB0 main",
+            f"Validated {len(scenarios)} scenarios against the exact JSB0 checkout",
             file=output,
         )
         print(f"JSB0 commit: {runtime_commit}", file=output)

@@ -21,6 +21,21 @@ class RecordingExecution:
         self.active -= 1
 
 
+class BlockingExecution:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    async def execute(self, run_id: int) -> None:
+        assert run_id == 101
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("limit", "expected_parallelism"), [(1, 1), (2, 2)])
 async def test_child_runs_respect_scheduler_concurrency(
@@ -35,21 +50,45 @@ async def test_child_runs_respect_scheduler_concurrency(
     await scheduler.shutdown()
 
 
+@pytest.mark.asyncio
+async def test_scheduler_graceful_shutdown_cancels_and_joins_active_work() -> None:
+    execution = BlockingExecution()
+    scheduler = InProcessRunScheduler(execution, 1)
+    scheduler.submit(101)
+    await execution.started.wait()
+
+    await scheduler.shutdown()
+
+    assert execution.cancelled.is_set()
+
+
 def test_comparison_status_aggregation() -> None:
     def child(run_id: int, status: RunStatus) -> ComparisonRun:
         return ComparisonRun(
             run_id=run_id, execution_variant=f"variant-{run_id}", status=status
         )
 
-    assert ComparisonRepository.aggregate_status([
-        child(1, RunStatus.COMPLETED), child(2, RunStatus.COMPLETED)
-    ]) is ComparisonStatus.COMPLETED
-    assert ComparisonRepository.aggregate_status([
-        child(1, RunStatus.FAILED), child(2, RunStatus.FAILED)
-    ]) is ComparisonStatus.FAILED
-    assert ComparisonRepository.aggregate_status([
-        child(1, RunStatus.COMPLETED), child(2, RunStatus.FAILED)
-    ]) is ComparisonStatus.PARTIAL_FAILED
-    assert ComparisonRepository.aggregate_status([
-        child(1, RunStatus.RUNNING), child(2, RunStatus.QUEUED)
-    ]) is ComparisonStatus.RUNNING
+    assert (
+        ComparisonRepository.aggregate_status(
+            [child(1, RunStatus.COMPLETED), child(2, RunStatus.COMPLETED)]
+        )
+        is ComparisonStatus.COMPLETED
+    )
+    assert (
+        ComparisonRepository.aggregate_status(
+            [child(1, RunStatus.FAILED), child(2, RunStatus.FAILED)]
+        )
+        is ComparisonStatus.FAILED
+    )
+    assert (
+        ComparisonRepository.aggregate_status(
+            [child(1, RunStatus.COMPLETED), child(2, RunStatus.FAILED)]
+        )
+        is ComparisonStatus.PARTIAL_FAILED
+    )
+    assert (
+        ComparisonRepository.aggregate_status(
+            [child(1, RunStatus.RUNNING), child(2, RunStatus.QUEUED)]
+        )
+        is ComparisonStatus.RUNNING
+    )

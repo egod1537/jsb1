@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-import shutil
-from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -13,26 +10,21 @@ from app.analysis.roll_hold_analyzer import RollHoldAnalysisVariants
 from app.api.build_routes import router as build_router
 from app.api.comparison_routes import router as comparison_router
 from app.api.dependencies import (
-    get_app_settings,
-    get_artifact_service,
     get_build_info,
+    get_health,
+    get_run_analysis,
     get_run_creation,
     get_run_deletion,
-    get_run_analysis,
-    get_runtime_variants,
-    get_database,
-    get_instances,
+    get_run_queries,
     get_telemetry_queries,
-    get_repository,
-    get_scenarios,
 )
 from app.api.deployment_routes import router as deployment_router
 from app.api.repository_routes import router as repository_router
 from app.api.runtime_routes import router as runtime_router
-from app.api.scenario_routes import router as scenario_router
 from app.api.scenario_inspection_routes import router as scenario_inspection_router
-from app.config.settings import Settings
+from app.api.scenario_routes import router as scenario_router
 from app.domain.build_info import BuildInfo
+from app.domain.errors import RuntimeRevisionNotFound, SnapshotWriteFailed
 from app.domain.models import (
     AvailableSignalsResponse,
     RunCreate,
@@ -40,26 +32,24 @@ from app.domain.models import (
     RunStatus,
     SignalResponse,
 )
-from app.repositories.database import Database
-from app.repositories.instances import InstanceRepository
-from app.repositories.runs import RunRepository
-from app.services.artifacts import ArtifactService, UnsafeArtifactPath
-from app.domain.errors import SnapshotWriteFailed
+from app.services.artifacts import UnsafeArtifactPath
+from app.services.health import HealthService
 from app.services.repository_manager import (
     GitOperationError,
     InvalidRepositoryPath,
     RuntimeRepositoryNotConfigured,
     RuntimeRepositoryUnavailable,
 )
-from app.services.scenarios import InvalidScenario, ScenarioService
-from app.services.runtime_variants import RuntimeVariantContractError
-from app.services.run_creation import CreateRunCommand, RunCreationService
 from app.services.run_analysis import AnalyzerNotApplicable, RunAnalysisService
+from app.services.run_creation import CreateRunCommand, RunCreationService
 from app.services.run_deletion import (
     ActiveRunDeletionNotAllowed,
     RunDeletionService,
     UnsafeRunDirectory,
 )
+from app.services.run_queries import RunNotFound, RunQueryService
+from app.services.runtime_variants import RuntimeVariantContractError
+from app.services.scenarios import InvalidScenario
 from app.services.telemetry_queries import TelemetryQueryService
 
 router = APIRouter(prefix="/api")
@@ -72,26 +62,11 @@ router.include_router(scenario_inspection_router)
 router.include_router(comparison_router)
 
 
-def require_run(repository: RunRepository, run_id: int):
-    try:
-        return repository.get(run_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="run not found") from exc
-
-
 @router.get("/health")
 def health(
-    database: Annotated[Database, Depends(get_database)],
-    settings: Annotated[Settings, Depends(get_app_settings)],
+    service: Annotated[HealthService, Depends(get_health)],
 ) -> dict[str, Any]:
-    executable = str(settings.runner_path)
-    runner_available = settings.runner_path.is_file() or shutil.which(executable) is not None
-    database_ok = database.ping()
-    return {
-        "status": "ok" if database_ok else "degraded",
-        "runner_available": runner_available,
-        "database": "ok" if database_ok else "error",
-    }
+    return service.status()
 
 
 @router.get("/version", response_model=BuildInfo)
@@ -125,9 +100,9 @@ async def create_run(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except SnapshotWriteFailed as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except RuntimeRevisionNotFound as exc:
+        raise HTTPException(status_code=404, detail="Branch no longer exists") from exc
     except GitOperationError as exc:
-        if str(exc).startswith("branch not found:"):
-            raise HTTPException(status_code=404, detail="Branch no longer exists") from exc
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="repository or build not found") from exc
@@ -137,33 +112,23 @@ async def create_run(
 
 @router.get("/runs")
 def list_runs(
-    repository: Annotated[RunRepository, Depends(get_repository)],
+    queries: Annotated[RunQueryService, Depends(get_run_queries)],
     status: RunStatus | None = None,
     scenario: str | None = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ):
-    return repository.list(status=status, scenario=scenario, limit=limit)
+    return queries.list(status=status, scenario=scenario, limit=limit)
 
 
 @router.get("/runs/{run_id}", response_model=RunDetail)
 def run_detail(
     run_id: int,
-    repository: Annotated[RunRepository, Depends(get_repository)],
-    artifacts: Annotated[ArtifactService, Depends(get_artifact_service)],
-    instances: Annotated[InstanceRepository, Depends(get_instances)],
-    scenarios: Annotated[ScenarioService, Depends(get_scenarios)],
+    queries: Annotated[RunQueryService, Depends(get_run_queries)],
 ) -> RunDetail:
-    run = require_run(repository, run_id)
-    if run.scenario_type is None:
-        scenario_type = scenarios.scenario_type_from_snapshot(Path(run.scenario_path))
-        if scenario_type is not None:
-            run = run.model_copy(update={"scenario_type": scenario_type})
-    return RunDetail(
-        run=run,
-        metrics=repository.get_metrics(run_id),
-        artifacts=[artifacts.public(row) for row in repository.get_artifact_rows(run_id)],
-        instance=instances.get_for_run(run_id),
-    )
+    try:
+        return queries.detail(run_id)
+    except RunNotFound as exc:
+        raise HTTPException(status_code=404, detail="run not found") from exc
 
 
 @router.delete("/runs/{run_id}", status_code=204)
@@ -185,10 +150,12 @@ def delete_run(
 @router.get("/runs/{run_id}/metrics")
 def run_metrics(
     run_id: int,
-    repository: Annotated[RunRepository, Depends(get_repository)],
+    queries: Annotated[RunQueryService, Depends(get_run_queries)],
 ) -> dict[str, float | None]:
-    require_run(repository, run_id)
-    return {metric.name: metric.value for metric in repository.get_metrics(run_id)}
+    try:
+        return queries.metrics(run_id)
+    except RunNotFound as exc:
+        raise HTTPException(status_code=404, detail="run not found") from exc
 
 
 @router.get(
@@ -212,7 +179,7 @@ def run_roll_hold_analysis(
 @router.get("/runs/{run_id}/signals", response_model=SignalResponse)
 def run_signals(
     run_id: int,
-    repository: Annotated[RunRepository, Depends(get_repository)],
+    queries: Annotated[RunQueryService, Depends(get_run_queries)],
     telemetry: Annotated[TelemetryQueryService, Depends(get_telemetry_queries)],
     signals: Annotated[str | None, Query(min_length=1)] = None,
     channels: Annotated[str | None, Query(min_length=1, deprecated=True)] = None,
@@ -221,8 +188,8 @@ def run_signals(
     end: Annotated[float | None, Query(ge=0)] = None,
     max_points: Annotated[int, Query(ge=10, le=20_000)] = 2000,
 ) -> SignalResponse:
-    require_run(repository, run_id)
     try:
+        queries.require(run_id)
         requested = signals or channels
         if requested is None:
             raise ValueError("signals is required")
@@ -234,6 +201,8 @@ def run_signals(
             end=end,
             max_points=max_points,
         )
+    except RunNotFound as exc:
+        raise HTTPException(status_code=404, detail="run not found") from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="telemetry artifact not found") from exc
     except (McapReadError, UnsafeArtifactPath, ValueError) as exc:
@@ -243,15 +212,18 @@ def run_signals(
 @router.get(
     "/runs/{run_id}/signals/available",
     response_model=AvailableSignalsResponse,
+    response_model_exclude_none=True,
 )
 def available_run_signals(
     run_id: int,
-    repository: Annotated[RunRepository, Depends(get_repository)],
+    queries: Annotated[RunQueryService, Depends(get_run_queries)],
     telemetry: Annotated[TelemetryQueryService, Depends(get_telemetry_queries)],
 ) -> AvailableSignalsResponse:
-    require_run(repository, run_id)
     try:
+        queries.require(run_id)
         return telemetry.available(run_id)
+    except RunNotFound as exc:
+        raise HTTPException(status_code=404, detail="run not found") from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="telemetry artifact not found") from exc
     except (McapReadError, UnsafeArtifactPath) as exc:
@@ -261,28 +233,24 @@ def available_run_signals(
 @router.get("/runs/{run_id}/artifacts")
 def run_artifacts(
     run_id: int,
-    repository: Annotated[RunRepository, Depends(get_repository)],
-    artifacts: Annotated[ArtifactService, Depends(get_artifact_service)],
+    queries: Annotated[RunQueryService, Depends(get_run_queries)],
 ):
-    require_run(repository, run_id)
-    return [artifacts.public(row) for row in repository.get_artifact_rows(run_id)]
+    try:
+        return queries.artifacts_for(run_id)
+    except RunNotFound as exc:
+        raise HTTPException(status_code=404, detail="run not found") from exc
 
 
 @router.get("/runs/{run_id}/artifacts/{kind}")
 def download_artifact(
     run_id: int,
     kind: str,
-    repository: Annotated[RunRepository, Depends(get_repository)],
-    artifacts: Annotated[ArtifactService, Depends(get_artifact_service)],
+    queries: Annotated[RunQueryService, Depends(get_run_queries)],
 ) -> FileResponse:
-    require_run(repository, run_id)
     if not kind.replace("_", "").isalnum():
         raise HTTPException(status_code=404, detail="artifact not found")
     try:
-        row = repository.get_artifact_row(run_id, kind)
-        path = artifacts.resolve(row["path"])
-    except (KeyError, UnsafeArtifactPath) as exc:
+        path = queries.artifact_file(run_id, kind)
+    except (RunNotFound, KeyError, FileNotFoundError, UnsafeArtifactPath) as exc:
         raise HTTPException(status_code=404, detail="artifact not found") from exc
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="artifact file not found")
     return FileResponse(path, filename=path.name, media_type="application/octet-stream")

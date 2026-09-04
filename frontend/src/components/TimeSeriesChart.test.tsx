@@ -1,6 +1,6 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { TimelineState } from "../features/plots/plotTypes";
+import type { TimelineState } from "../types/view";
 import { clampTooltipPosition, formatChartTooltip, TimeSeriesChart, type ChartAnnotations } from "./TimeSeriesChart";
 
 const echartsMock = vi.hoisted(() => {

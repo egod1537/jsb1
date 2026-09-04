@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel
@@ -22,6 +23,13 @@ class ScenarioRuntime(BaseModel):
     commit: str
 
 
+class ScenarioValidationPolicy(StrEnum):
+    """Why a contract is being applied to scenario bytes."""
+
+    CATALOG_STABLE = "catalog_stable"
+    RUN_EXACT = "run_exact"
+
+
 class ScenarioValidationResult(BaseModel):
     valid: bool
     scenario: ScenarioSummary | None = None
@@ -38,6 +46,15 @@ class ScenarioDocument:
     autopilot: str | None
     schema_version: int | None
     controller_parameters: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ScenarioEvaluation:
+    """One parse shared by validation, metadata, inspection, and snapshots."""
+
+    document: ScenarioDocument | None
+    result: ScenarioValidationResult
+    policy: ScenarioValidationPolicy
 
 
 class ScenarioDocumentError(ValueError):

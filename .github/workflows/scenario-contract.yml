@@ -19,11 +19,11 @@ jobs:
         with:
           path: jsb1
 
-      - name: Check out JSB0 main contract
+      - name: Check out JSB0 impl contract
         uses: actions/checkout@v7
         with:
           repository: egod1537/jsb0
-          ref: main
+          ref: impl
           path: jsb0
 
       - name: Set up Python

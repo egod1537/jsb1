@@ -9,15 +9,19 @@ from typing import ClassVar
 
 import paramiko
 from app.config.settings import Settings
+from app.domain.scenario_source import ScenarioSourceType
+from app.domain.scenario_validation import ScenarioValidationPolicy
 from app.repositories.database import Database
 from app.repositories.scenario_catalog import ScenarioCatalogRepository
 from app.services.scenario_sources.base import ScenarioObject
 from app.services.scenario_sources.sftp import SftpScenarioSource
+from app.services.scenario_snapshots import ScenarioSnapshotService
 from app.services.scenario_sync import (
     CompatibilityContract,
     ScenarioSyncService,
 )
 from app.services.scenario_validator import ScenarioRuntime, ScenarioValidator
+from app.services.scenarios import ScenarioService
 
 
 def write_contract(root: Path) -> None:
@@ -170,15 +174,15 @@ def test_sftp_source_recurses_and_enforces_root(tmp_path: Path) -> None:
         client_factory=FakeSshClient,
     )
 
-    assert [item.id for item in source.list_objects()] == ["roll/foo.yaml"]
-    assert source.fetch("roll/foo.yaml").startswith(b"name: Foo")
-    assert source.stat("roll/foo.yaml").size
+    assert source.source_type is ScenarioSourceType.REMOTE
+    assert [item.id for item in source.list()] == ["roll/foo.yaml"]
+    assert source.read("roll/foo.yaml").startswith(b"name: Foo")
     client = FakeSshClient.instances[-1]
     assert isinstance(client.policy, paramiko.RejectPolicy)
     assert client.connect_args["allow_agent"] is True
     assert client.connect_args["look_for_keys"] is False
     try:
-        source.fetch("../secret.yaml")
+        source.read("../secret.yaml")
     except ValueError as exc:
         assert "relative YAML" in str(exc)
     else:
@@ -198,7 +202,7 @@ def test_sftp_auth_or_host_key_failure_is_not_silenced() -> None:
         client_factory=RejectingClient,
     )
     try:
-        source.list_objects()
+        source.list()
     except paramiko.SSHException as exc:
         assert "host key rejected" in str(exc)
     else:
@@ -225,12 +229,16 @@ class FakeSource:
         self.files = files
         self.failure: Exception | None = None
 
-    def list_objects(self):
+    @property
+    def source_type(self):
+        return ScenarioSourceType.REMOTE
+
+    def list(self):
         if self.failure:
             raise self.failure
         return [ScenarioObject(name, len(value)) for name, value in self.files.items()]
 
-    def fetch(self, object_id: str) -> bytes:
+    def read(self, object_id: str) -> bytes:
         return self.files[object_id]
 
     def stat(self, object_id: str):
@@ -263,27 +271,40 @@ def test_sync_preserves_last_good_cache_and_survives_outage(tmp_path: Path) -> N
     )
 
     first = service.sync()
-    cached = cache / "roll" / "foo.yaml"
     assert first.valid == 1 and first.updated == 1
-    assert cached.read_bytes() == source.files["roll/foo.yaml"]
+    first_row = catalog.list_valid()[0]
+    assert first_row["cache_path"].startswith("objects/")
+    immutable_cache = cache / first_row["cache_path"]
+    assert immutable_cache.read_bytes() == source.files["roll/foo.yaml"]
+    scenarios = ScenarioService(
+        tmp_path / "bundled",
+        remote_cache_dir=cache,
+        catalog_repository=catalog,
+    )
+    assert scenarios.load("roll/foo.yaml", "sftp").name == "Foo"
 
     source.files["roll/foo.yaml"] = b"name: Broken\nautopilot: unsupported\n"
     rejected = service.sync()
     assert rejected.invalid == 1
-    assert cached.read_text(encoding="utf-8").endswith("baseline\n")
+    assert immutable_cache.read_text(encoding="utf-8").endswith("baseline\n")
+    assert scenarios.load("roll/foo.yaml", "sftp").name == "Foo"
     assert catalog.list_valid()[0]["name"] == "Foo"
     assert catalog.list_invalid()[0]["errors"][0]["path"] == "autopilot"
 
     source.files["roll/foo.yaml"] = b"name: Updated\nautopilot: primary\n"
     replaced = service.sync()
     assert replaced.valid == 1 and replaced.updated == 1
-    assert cached.read_text(encoding="utf-8").startswith("name: Updated")
-    assert catalog.list_valid()[0]["name"] == "Updated"
+    updated_row = catalog.list_valid()[0]
+    assert updated_row["name"] == "Updated"
+    updated_cache = cache / updated_row["cache_path"]
+    assert updated_cache.read_text(encoding="utf-8").startswith("name: Updated")
+    assert immutable_cache.read_text(encoding="utf-8").endswith("baseline\n")
+    assert scenarios.load("roll/foo.yaml", "sftp").name == "Updated"
 
     source.failure = ConnectionError("offline")
     offline = service.sync()
     assert not offline.reachable
-    assert cached.is_file()
+    assert updated_cache.is_file()
     assert catalog.list_valid()[0]["scenario_id"] == "roll/foo.yaml"
 
 
@@ -305,9 +326,38 @@ def test_successful_sync_marks_remote_deletion_inactive(tmp_path: Path) -> None:
         compatibility=FakeCompatibility(runtime),  # type: ignore[arg-type]
     )
     service.sync()
+    snapshot = ScenarioSnapshotService(tmp_path / "data").for_run(
+        1,
+        source.files["foo.yaml"].decode("utf-8"),
+        "scenario.yaml",
+    )
     source.files.clear()
 
     result = service.sync()
 
     assert result.removed == 1
     assert catalog.list_valid() == []
+    assert snapshot.absolute_path.read_text(encoding="utf-8").startswith("name: Foo")
+
+
+def test_validation_evaluation_carries_catalog_or_exact_policy(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    write_contract(runtime)
+    validator = ScenarioValidator()
+    contract = validator.load_runtime_contract(runtime)
+
+    stable = validator.evaluate_yaml(
+        "name: Stable\nautopilot: baseline\n",
+        contract,
+        policy=ScenarioValidationPolicy.CATALOG_STABLE,
+    )
+    exact = validator.evaluate_yaml(
+        "name: Exact\nautopilot: primary\n",
+        contract,
+        policy=ScenarioValidationPolicy.RUN_EXACT,
+    )
+
+    assert stable.result.valid and stable.document is not None
+    assert stable.policy is ScenarioValidationPolicy.CATALOG_STABLE
+    assert exact.result.valid and exact.document is not None
+    assert exact.policy is ScenarioValidationPolicy.RUN_EXACT

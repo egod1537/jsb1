@@ -879,6 +879,9 @@ from the canonical JSB0 Runtime and is not a repository-registration workflow in
 Repositories page. New host deployments should use `./deploy.sh <branch>`. The
 legacy API response is queued and the UI polls until it becomes `running` or `failed`:
 
+The authoritative ownership split and worker shutdown/recovery policy are documented
+in [`docs/deployment-worker-infrastructure.md`](docs/deployment-worker-infrastructure.md).
+
 ```sh
 curl -X POST http://127.0.0.1:8081/api/deployments \
   -H 'Content-Type: application/json' \

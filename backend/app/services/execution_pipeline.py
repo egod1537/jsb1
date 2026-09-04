@@ -6,7 +6,6 @@ from typing import Protocol
 
 from app.domain.pipeline import PipelineStage, PipelineStageStatus
 
-
 RUN_PIPELINE: tuple[tuple[str, str], ...] = (
     ("resolve_scenario", "Resolve Scenario"),
     ("resolve_runtime_revision", "Resolve Runtime Revision"),
@@ -106,6 +105,38 @@ class ExecutionPipelineRecorder:
                 )
         self.store.set_pipeline(
             self.entity_id, current_stage=stage_id, stages=stages
+        )
+
+    def recoverable_failure(self, stage_id: str, error: str) -> None:
+        """Record a failed stage while allowing a later lifecycle stage to finish."""
+        self.initialize()
+        stages = [
+            stage.model_copy(deep=True)
+            for stage in self.store.get(self.entity_id).stages
+        ]
+        now = datetime.now(timezone.utc)
+        index = self._index(stages, stage_id)
+        stage = stages[index]
+        started = stage.started_at or now
+        stages[index] = stage.model_copy(
+            update={
+                "status": PipelineStageStatus.FAILED,
+                "started_at": started,
+                "finished_at": now,
+                "duration_sec": max(0.0, (now - started).total_seconds()),
+                "error": error[:4000],
+            }
+        )
+        current_stage = next(
+            (
+                later.id
+                for later in stages[index + 1 :]
+                if later.status is PipelineStageStatus.PENDING
+            ),
+            stage_id,
+        )
+        self.store.set_pipeline(
+            self.entity_id, current_stage=current_stage, stages=stages
         )
 
     def fail_current(self, error: str) -> None:

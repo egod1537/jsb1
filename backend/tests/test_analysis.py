@@ -2,15 +2,22 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from google.protobuf.descriptor_pb2 import FieldDescriptorProto, FileDescriptorProto
-from google.protobuf.descriptor_pool import DescriptorPool
-from google.protobuf.message_factory import GetMessageClass
-from mcap_protobuf.writer import Writer as ProtobufWriter
-
 from app.analysis.downsampling import uniform_downsample
 from app.analysis.mcap_reader import McapRunReader
 from app.analysis.roll_hold import compute_roll_hold_metrics
 from app.analysis.roll_hold_analyzer import RollHoldAnalyzer
+from google.protobuf.descriptor_pb2 import FieldDescriptorProto, FileDescriptorProto
+from google.protobuf.descriptor_pool import DescriptorPool
+from google.protobuf.message_factory import GetMessageClass
+from jsb1_analysis.metrics import (
+    absolute_overshoot,
+    peak_absolute,
+    rms_error,
+    settling_time,
+    steady_state_error,
+)
+from mcap_protobuf.writer import Writer as ProtobufWriter
+
 from tests.conftest import write_sample_mcap
 
 
@@ -85,25 +92,24 @@ def test_mcap_reader_decodes_jsb0_roll_control_protobuf(tmp_path: Path) -> None:
         pool.FindMessageTypeByName("jsb.telemetry.v1.RollControlState")
     )
     path = tmp_path / "protobuf.mcap"
-    with path.open("wb") as stream:
-        with ProtobufWriter(stream) as writer:
-            for index in range(3):
-                stamp = index * 10_000_000
-                writer.write_message(
-                    "/jsb/primary/control/roll",
-                    message_class(
-                        sim_time_ns=stamp,
-                        commanded_roll_rad=0.1 * index,
-                        commanded_roll_rate_rad_s=0.2 * index,
-                        roll_error_rad=0.02 * index,
-                        roll_rad=0.08 * index,
-                        roll_rate_rad_s=0.15 * index,
-                        roll_rate_error_rad_s=0.05 * index,
-                        aileron_command=0.05 * index,
-                    ),
-                    log_time=stamp,
-                    publish_time=stamp,
-                )
+    with path.open("wb") as stream, ProtobufWriter(stream) as writer:
+        for index in range(3):
+            stamp = index * 10_000_000
+            writer.write_message(
+                "/jsb/primary/control/roll",
+                message_class(
+                    sim_time_ns=stamp,
+                    commanded_roll_rad=0.1 * index,
+                    commanded_roll_rate_rad_s=0.2 * index,
+                    roll_error_rad=0.02 * index,
+                    roll_rad=0.08 * index,
+                    roll_rate_rad_s=0.15 * index,
+                    roll_rate_error_rad_s=0.05 * index,
+                    aileron_command=0.05 * index,
+                ),
+                log_time=stamp,
+                publish_time=stamp,
+            )
 
     reader = McapRunReader()
     assert set(reader.channels(path)) >= {
@@ -137,6 +143,38 @@ def test_roll_hold_metric_definitions() -> None:
     assert metrics["overshoot_deg"].value == 0
     assert 0 < (metrics["rms_error_deg"].value or 0) < 5
     assert metrics["max_abs_aileron_deg"].unit == "deg"
+
+
+def test_backend_roll_metrics_are_shared_package_primitives_in_si() -> None:
+    time = np.linspace(0, 6, 601)
+    command = np.where(time >= 1, np.deg2rad(5), 0)
+    roll = np.where(time >= 1, command * (1 - np.exp(-(time - 1))), 0)
+    aileron = (command - roll) * 0.5
+    metrics = {
+        item.name: item.value
+        for item in compute_roll_hold_metrics(time, command, roll, aileron)
+    }
+    onset = int(np.flatnonzero(np.abs(command - command[0]) > 1e-9)[0])
+    rad_to_deg = 180.0 / np.pi
+
+    assert metrics["settling_time_sec"] == settling_time(
+        time,
+        command - roll,
+        band=np.deg2rad(0.5),
+        onset=onset,
+    )
+    assert metrics["overshoot_deg"] == pytest.approx(
+        absolute_overshoot(command, roll, onset=onset) * rad_to_deg
+    )
+    assert metrics["rms_error_deg"] == pytest.approx(
+        rms_error(command[onset:], roll[onset:]) * rad_to_deg
+    )
+    assert metrics["steady_state_error_deg"] == pytest.approx(
+        steady_state_error(command, roll, fraction=0.2) * rad_to_deg
+    )
+    assert metrics["max_abs_aileron_deg"] == pytest.approx(
+        peak_absolute(aileron) * rad_to_deg
+    )
 
 
 def test_roll_hold_analyzer_step_response_metrics_and_command_window() -> None:

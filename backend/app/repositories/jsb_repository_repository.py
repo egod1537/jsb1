@@ -2,13 +2,10 @@ from __future__ import annotations
 
 import sqlite3
 
+from app.domain.clock import utc_now
+from app.domain.errors import RepositoryConflict
 from app.domain.repository import Repository
 from app.repositories.database import Database
-from app.repositories.runs import utc_now
-
-
-class RepositoryConflict(RuntimeError):
-    pass
 
 
 class JsbRepositoryRepository:

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 import json
-from typing import Any, Iterable
+from collections.abc import Callable, Iterable
+from typing import Any
 
-from app.domain.build import Build, BuildStatus
-from app.repositories.database import Database
-from app.repositories.runs import InvalidStatusTransition, utc_now
+from app.domain.build import BUILD_STATUS_TRANSITIONS, Build, BuildStatus
+from app.domain.clock import utc_now
+from app.domain.errors import InvalidStatusTransition
+from app.domain.lifecycle import ensure_transition
 from app.domain.pipeline import PipelineStage
+from app.repositories.database import Database
 
 
 class BuildRepository:
@@ -42,6 +44,13 @@ class BuildRepository:
                 ),
             )
             build_id = int(cursor.lastrowid)
+            connection.execute(
+                """INSERT INTO build_keys(repository_id, commit_sha, build_id)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(repository_id, commit_sha) DO UPDATE SET
+                     build_id = excluded.build_id""",
+                (repository_id, commit_sha, build_id),
+            )
         return self.get(build_id)
 
     def set_paths(
@@ -72,7 +81,9 @@ class BuildRepository:
             raise KeyError(build_id)
         return Build.model_validate(self._with_pipeline(dict(row)))
 
-    def list(self, *, repository_id: int | None = None, limit: int = 100) -> list[Build]:
+    def list(
+        self, *, repository_id: int | None = None, limit: int = 100
+    ) -> list[Build]:
         where = "WHERE b.repository_id = ?" if repository_id is not None else ""
         parameters: list[Any] = [repository_id] if repository_id is not None else []
         parameters.append(limit)
@@ -80,21 +91,10 @@ class BuildRepository:
             rows = connection.execute(
                 f"""SELECT b.*, r.name AS repository_name
                     FROM builds b JOIN repositories r ON r.id = b.repository_id
-                    {where} ORDER BY b.id DESC LIMIT ?""",  # noqa: S608
+                    {where} ORDER BY b.id DESC LIMIT ?""",
                 parameters,
             ).fetchall()
         return [Build.model_validate(self._with_pipeline(dict(row))) for row in rows]
-
-    def find_completed(self, repository_id: int, commit_sha: str) -> Build | None:
-        with self.database.connect() as connection:
-            row = connection.execute(
-                """SELECT b.*, r.name AS repository_name
-                   FROM builds b JOIN repositories r ON r.id = b.repository_id
-                   WHERE b.repository_id = ? AND b.commit_sha = ? AND b.status = 'completed'
-                   ORDER BY b.id DESC LIMIT 1""",
-                (repository_id, commit_sha),
-            ).fetchone()
-        return Build.model_validate(self._with_pipeline(dict(row))) if row is not None else None
 
     def set_pipeline(
         self,
@@ -134,22 +134,22 @@ class BuildRepository:
         with self.database.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                """SELECT id FROM builds
-                   WHERE repository_id = ? AND commit_sha = ?
-                     AND status IN ('running', 'queued')
-                   ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, id
-                   LIMIT 1""",
+                """SELECT builds.id, builds.status
+                   FROM build_keys
+                   JOIN builds ON builds.id = build_keys.build_id
+                   WHERE build_keys.repository_id = ?
+                     AND build_keys.commit_sha = ?""",
                 (repository_id, commit_sha),
             ).fetchone()
-            if row is None and not rebuild:
-                row = connection.execute(
-                    """SELECT id FROM builds
-                       WHERE repository_id = ? AND commit_sha = ?
-                         AND status = 'completed'
-                       ORDER BY id DESC LIMIT 1""",
-                    (repository_id, commit_sha),
-                ).fetchone()
-            if row is not None:
+            reusable = row is not None and (
+                row["status"]
+                in {
+                    BuildStatus.QUEUED.value,
+                    BuildStatus.RUNNING.value,
+                }
+                or (row["status"] == BuildStatus.COMPLETED.value and not rebuild)
+            )
+            if reusable:
                 selected_id = int(row["id"])
                 reused = True
             else:
@@ -174,6 +174,13 @@ class BuildRepository:
                        WHERE id = ?""",
                     (build_dir, stdout_path, stderr_path, selected_id),
                 )
+                connection.execute(
+                    """INSERT INTO build_keys(repository_id, commit_sha, build_id)
+                       VALUES (?, ?, ?)
+                       ON CONFLICT(repository_id, commit_sha) DO UPDATE SET
+                         build_id = excluded.build_id""",
+                    (repository_id, commit_sha, selected_id),
+                )
         return self.get(selected_id), reused
 
     def list_ids(self, status: BuildStatus, *, limit: int = 100) -> list[int]:
@@ -191,7 +198,7 @@ class BuildRepository:
         placeholders = ", ".join("?" for _ in values)
         with self.database.connect() as connection:
             rows = connection.execute(
-                f"SELECT id FROM builds WHERE status IN ({placeholders}) ORDER BY id",  # noqa: S608
+                f"SELECT id FROM builds WHERE status IN ({placeholders}) ORDER BY id",
                 values,
             ).fetchall()
         return [int(row["id"]) for row in rows]
@@ -204,13 +211,37 @@ class BuildRepository:
         status: BuildStatus,
         **fields: Any,
     ) -> Build:
+        expected_statuses = tuple(expected)
+        if not expected_statuses:
+            raise InvalidStatusTransition("expected build statuses must not be empty")
+        for current in expected_statuses:
+            ensure_transition(
+                current,
+                status,
+                BUILD_STATUS_TRANSITIONS,
+                entity="build",
+            )
+        permitted_fields = {
+            BuildStatus.RUNNING: {"started_at"},
+            BuildStatus.COMPLETED: {
+                "executable_path",
+                "completed_at",
+                "error_message",
+            },
+            BuildStatus.FAILED: {"completed_at", "error_message"},
+        }[status]
+        unexpected_fields = set(fields) - permitted_fields
+        if unexpected_fields:
+            raise ValueError(
+                "invalid lifecycle fields: " + ", ".join(sorted(unexpected_fields))
+            )
         values = {"status": status.value, **fields}
         assignments = ", ".join(f"{name} = ?" for name in values)
-        expected_values = [item.value for item in expected]
+        expected_values = [item.value for item in expected_statuses]
         placeholders = ", ".join("?" for _ in expected_values)
         with self.database.connect() as connection:
             cursor = connection.execute(
-                f"UPDATE builds SET {assignments} WHERE id = ? AND status IN ({placeholders})",  # noqa: S608
+                f"UPDATE builds SET {assignments} WHERE id = ? AND status IN ({placeholders})",
                 [*values.values(), build_id, *expected_values],
             )
             if cursor.rowcount != 1:
@@ -219,15 +250,57 @@ class BuildRepository:
                 )
         return self.get(build_id)
 
-    def fail_incomplete_from_previous_process(self) -> int:
+    def mark_running(self, build_id: int, *, started_at: str) -> Build:
+        return self.transition(
+            build_id,
+            expected=[BuildStatus.QUEUED],
+            status=BuildStatus.RUNNING,
+            started_at=started_at,
+        )
+
+    def claim_for_build(self, build_id: int, *, started_at: str) -> Build | None:
+        """Atomically claim one queued Build; duplicate workers receive ``None``."""
         with self.database.connect() as connection:
             cursor = connection.execute(
-                """UPDATE builds SET status = 'failed', completed_at = ?,
-                          error_message = 'backend restarted before build completed'
-                   WHERE status IN ('queued', 'running')""",
-                (utc_now(),),
+                """UPDATE builds SET status = ?, started_at = ?
+                   WHERE id = ? AND status = ?""",
+                (
+                    BuildStatus.RUNNING.value,
+                    started_at,
+                    build_id,
+                    BuildStatus.QUEUED.value,
+                ),
             )
-            return cursor.rowcount
+            if cursor.rowcount != 1:
+                return None
+        return self.get(build_id)
+
+    def complete_build(
+        self,
+        build_id: int,
+        *,
+        executable_path: str,
+        completed_at: str,
+    ) -> Build:
+        return self.transition(
+            build_id,
+            expected=[BuildStatus.RUNNING],
+            status=BuildStatus.COMPLETED,
+            executable_path=executable_path,
+            completed_at=completed_at,
+            error_message=None,
+        )
+
+    def fail_build(
+        self, build_id: int, *, completed_at: str, error_message: str
+    ) -> Build:
+        return self.transition(
+            build_id,
+            expected=[BuildStatus.QUEUED, BuildStatus.RUNNING],
+            status=BuildStatus.FAILED,
+            completed_at=completed_at,
+            error_message=error_message,
+        )
 
     def fail_running_from_previous_worker(self) -> int:
         with self.database.connect() as connection:

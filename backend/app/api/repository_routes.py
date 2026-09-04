@@ -5,14 +5,13 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Response
 
 from app.api.dependencies import get_repository_manager
+from app.domain.errors import RepositoryConflict
 from app.domain.repository import Branch, RepositoryCreate, RepositoryStatus, Revision
-from app.repositories.jsb_repository_repository import RepositoryConflict
 from app.services.repository_manager import (
     GitOperationError,
     InvalidRepositoryPath,
     RepositoryManager,
 )
-
 
 router = APIRouter(prefix="/repositories", tags=["repositories"])
 

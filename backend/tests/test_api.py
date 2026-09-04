@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
 import time
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
+from app.domain.artifacts import StoredArtifact
 from app.domain.build import BuildStatus
 from app.domain.models import Metric, RunStatus
 from app.domain.repository import RepositoryCreate
@@ -13,8 +17,6 @@ from app.main import create_app
 from app.repositories.runs import utc_now
 from app.services.scenario_sync import CompatibilityContract
 from app.services.scenario_validator import ScenarioRuntime
-from fastapi.testclient import TestClient
-
 from tests.conftest import FakeSimulationRunner
 
 
@@ -55,10 +57,12 @@ def create_jsb0_fixture(source: Path) -> tuple[str, str]:
     execution_dir = source / "contract" / "execution"
     execution_dir.mkdir(parents=True)
     (execution_dir / "capabilities.json").write_text(
-        json.dumps({
-            "mode": "compare",
-            "variants": ["baseline", "primary"],
-        }),
+        json.dumps(
+            {
+                "mode": "compare",
+                "variants": ["baseline", "primary"],
+            }
+        ),
         encoding="utf-8",
     )
     git("add", ".", cwd=source)
@@ -101,6 +105,9 @@ def test_health_and_invalid_scenario(settings) -> None:
         health = client.get("/api/health")
         assert health.status_code == 200
         assert health.json()["database"] == "ok"
+        assert health.json()["worker_mode"] == "embedded"
+        assert health.json()["runner_required"] is True
+        assert health.json()["runtime_repository"] in {"ready", "unavailable"}
         assert client.get("/api/deployments").json() == []
         response = client.post(
             "/api/runs",
@@ -171,7 +178,9 @@ def test_main_deployment_stop_requires_force(settings) -> None:
             commit_sha="a" * 40,
             slug="main",
             hostname="jsb.mangagaki.net",
-            worktree_path=str(settings.resolved_worktree_root / str(source.id) / ("a" * 40)),
+            worktree_path=str(
+                settings.resolved_worktree_root / str(source.id) / ("a" * 40)
+            ),
         )
         denied = client.delete(f"/api/deployments/{deployment.id}")
         assert denied.status_code == 422
@@ -198,10 +207,22 @@ def test_successful_run_flow_and_signal_api(settings) -> None:
         assert detail["run"]["branch"] is None
         assert detail["run"]["build_id"] is None
         assert len(detail["metrics"]) == 5
-        assert {item["kind"] for item in detail["artifacts"]} >= {"telemetry", "metrics", "run", "stdout", "scenario"}
+        assert {item["kind"] for item in detail["artifacts"]} >= {
+            "telemetry",
+            "metrics",
+            "run",
+            "stdout",
+            "scenario",
+        }
+        telemetry_artifact = next(
+            item for item in detail["artifacts"] if item["kind"] == "telemetry"
+        )
+        assert len(telemetry_artifact["sha256"]) == 64
+        assert telemetry_artifact["size_bytes"] > 0
         assert detail["run"]["scenario_source"] == "bundled"
         assert detail["run"]["scenario_type"] == "roll_hold"
         assert detail["run"]["scenario_sha256"]
+        assert not Path(detail["run"]["scenario_path"]).is_absolute()
         assert detail["run"]["current_stage"] == "complete"
         assert [stage["id"] for stage in detail["run"]["stages"]] == [
             "resolve_scenario",
@@ -253,7 +274,10 @@ def test_successful_run_flow_and_signal_api(settings) -> None:
             "unit": "deg",
             "source": "scenario",
         }
-        assert analysis_body["targets"]["aileron_saturation_time_s"]["source"] == "unavailable"
+        assert (
+            analysis_body["targets"]["aileron_saturation_time_s"]["source"]
+            == "unavailable"
+        )
         assert analysis_body["regions"]["response"]["start_sec"] == 5
         assert analysis_body["regions"]["steady_state_error"]["start_sec"] >= 5
         assert analysis_body["markers"]["command"]["time_sec"] == 5
@@ -308,7 +332,9 @@ def test_successful_run_flow_and_signal_api(settings) -> None:
         assert artifact.status_code == 200
 
 
-def test_delete_terminal_run_cleans_owned_state_and_preserves_shared_build(settings) -> None:
+def test_delete_terminal_run_cleans_owned_state_and_preserves_shared_build(
+    settings,
+) -> None:
     with TestClient(create_app(settings, FakeSimulationRunner())) as client:
         source = client.app.state.jsb_repositories.create(
             name="jsb0-delete-test",
@@ -333,16 +359,27 @@ def test_delete_terminal_run_cleans_owned_state_and_preserves_shared_build(setti
             scenario_path="scenario.yaml",
             autopilot="primary",
         )
-        runs.set_output_directory(run.id, f"runs/{run.id:06d}")
         run_directory = settings.runs_dir / f"{run.id:06d}"
         run_directory.mkdir(parents=True)
         telemetry = run_directory / "telemetry.mcap"
         telemetry.write_bytes(b"mcap")
-        runs.upsert_artifact(run.id, "telemetry", f"runs/{run.id:06d}/telemetry.mcap")
-        runs.replace_metrics(run.id, [Metric(name="rms_error_deg", value=0.2, unit="deg")])
+        runs.record_artifact(
+            run.id,
+            StoredArtifact(
+                "telemetry",
+                f"runs/{run.id:06d}/telemetry.mcap",
+                hashlib.sha256(b"mcap").hexdigest(),
+                4,
+            ),
+        )
+        runs.replace_metrics(
+            run.id, [Metric(name="rms_error_deg", value=0.2, unit="deg")]
+        )
         client.app.state.instances.create(build_id=build.id, run_id=run.id)
         runs.transition(run.id, expected=[RunStatus.QUEUED], status=RunStatus.RUNNING)
-        runs.transition(run.id, expected=[RunStatus.RUNNING], status=RunStatus.COMPLETED)
+        runs.transition(
+            run.id, expected=[RunStatus.RUNNING], status=RunStatus.COMPLETED
+        )
 
         response = client.delete(f"/api/runs/{run.id}")
         assert response.status_code == 204
@@ -350,9 +387,24 @@ def test_delete_terminal_run_cleans_owned_state_and_preserves_shared_build(setti
         assert not run_directory.exists()
         assert client.app.state.builds.get(build.id).id == build.id
         with client.app.state.database.connect() as connection:
-            assert connection.execute("SELECT count(*) FROM metrics WHERE run_id = ?", (run.id,)).fetchone()[0] == 0
-            assert connection.execute("SELECT count(*) FROM artifacts WHERE run_id = ?", (run.id,)).fetchone()[0] == 0
-            assert connection.execute("SELECT count(*) FROM instances WHERE run_id = ?", (run.id,)).fetchone()[0] == 0
+            assert (
+                connection.execute(
+                    "SELECT count(*) FROM metrics WHERE run_id = ?", (run.id,)
+                ).fetchone()[0]
+                == 0
+            )
+            assert (
+                connection.execute(
+                    "SELECT count(*) FROM artifacts WHERE run_id = ?", (run.id,)
+                ).fetchone()[0]
+                == 0
+            )
+            assert (
+                connection.execute(
+                    "SELECT count(*) FROM instances WHERE run_id = ?", (run.id,)
+                ).fetchone()[0]
+                == 0
+            )
 
         failed = runs.create(
             commit_sha="b" * 40,
@@ -364,7 +416,9 @@ def test_delete_terminal_run_cleans_owned_state_and_preserves_shared_build(setti
         assert client.delete(f"/api/runs/{failed.id}").status_code == 204
 
 
-def test_delete_run_rejects_active_missing_and_unsafe_paths(settings, tmp_path: Path) -> None:
+def test_delete_run_rejects_active_missing_and_unsafe_paths(
+    settings, tmp_path: Path
+) -> None:
     with TestClient(create_app(settings, FakeSimulationRunner())) as client:
         runs = client.app.state.repository
         queued = runs.create(
@@ -386,7 +440,9 @@ def test_delete_run_rejects_active_missing_and_unsafe_paths(settings, tmp_path: 
             scenario_path="scenario.yaml",
             autopilot="primary",
         )
-        runs.transition(running.id, expected=[RunStatus.QUEUED], status=RunStatus.RUNNING)
+        runs.transition(
+            running.id, expected=[RunStatus.QUEUED], status=RunStatus.RUNNING
+        )
         assert client.delete(f"/api/runs/{running.id}").status_code == 409
         assert client.delete("/api/runs/999999").status_code == 404
 
@@ -400,7 +456,9 @@ def test_delete_run_rejects_active_missing_and_unsafe_paths(settings, tmp_path: 
         outside = tmp_path / "outside-run-data"
         outside.mkdir()
         (outside / "keep.txt").write_text("keep", encoding="utf-8")
-        (settings.runs_dir / f"{unsafe.id:06d}").symlink_to(outside, target_is_directory=True)
+        (settings.runs_dir / f"{unsafe.id:06d}").symlink_to(
+            outside, target_is_directory=True
+        )
         rejected = client.delete(f"/api/runs/{unsafe.id}")
         assert rejected.status_code == 422
         assert (outside / "keep.txt").read_text(encoding="utf-8") == "keep"
@@ -572,7 +630,9 @@ def test_managed_scenario_create_api_revalidates_and_never_overwrites(
         assert detail.json()["provenance"]["authority"] == "managed scenario"
 
 
-def test_scenario_library_catalog_detail_and_path_safety(settings, tmp_path: Path) -> None:
+def test_scenario_library_catalog_detail_and_path_safety(
+    settings, tmp_path: Path
+) -> None:
     runtime = tmp_path / "library-runtime"
     schema_dir = runtime / "contract" / "scenario"
     schema_dir.mkdir(parents=True)
@@ -623,8 +683,7 @@ def test_scenario_library_catalog_detail_and_path_safety(settings, tmp_path: Pat
         catalog = client.get("/api/scenario-catalog")
         assert catalog.status_code == 200
         selected = next(
-            item for item in catalog.json()
-            if item["path"] == "roll_hold_5deg.yaml"
+            item for item in catalog.json() if item["path"] == "roll_hold_5deg.yaml"
         )
         assert selected["id"] == "bundled:roll_hold_5deg.yaml"
         assert selected["scenario_type"] == "roll_hold"
@@ -635,7 +694,9 @@ def test_scenario_library_catalog_detail_and_path_safety(settings, tmp_path: Pat
             "runtime_commit": "d" * 40,
             "errors": [],
         }
-        rejected = next(item for item in catalog.json() if item["id"] == "sftp:remote/bad.yaml")
+        rejected = next(
+            item for item in catalog.json() if item["id"] == "sftp:remote/bad.yaml"
+        )
         assert rejected["validation"]["valid"] is False
         assert rejected["validation"]["errors"][0]["path"] == "command.roll_deg"
 
@@ -661,10 +722,13 @@ def test_scenario_library_catalog_detail_and_path_safety(settings, tmp_path: Pat
             params={"source": "bundled", "id": "../secret.yaml"},
         )
         assert traversal.status_code == 404
-        assert client.get(
-            "/api/scenario-catalog/detail",
-            params={"source": "bundled", "id": "missing.yaml"},
-        ).status_code == 404
+        assert (
+            client.get(
+                "/api/scenario-catalog/detail",
+                params={"source": "bundled", "id": "missing.yaml"},
+            ).status_code
+            == 404
+        )
 
 
 def test_run_scenario_snapshot_is_frozen_and_reports_integrity(settings) -> None:
@@ -679,7 +743,9 @@ def test_run_scenario_snapshot_is_frozen_and_reports_integrity(settings) -> None
         run_id = created.json()["id"]
         wait_for_terminal(client, run_id)
 
-        source.write_text(original.replace("roll_deg: 5", "roll_deg: 9"), encoding="utf-8")
+        source.write_text(
+            original.replace("roll_deg: 5", "roll_deg: 9"), encoding="utf-8"
+        )
         snapshot = client.get(f"/api/runs/{run_id}/scenario")
         assert snapshot.status_code == 200
         assert snapshot.json()["raw_yaml"] == original
@@ -734,6 +800,9 @@ def test_build_backed_run_persists_repository_lineage(settings) -> None:
             executable_path=str(executable),
             completed_at=utc_now(),
         )
+        public_build = client.get(f"/api/builds/{build.id}").json()
+        assert not Path(public_build["build_dir"]).is_absolute()
+        assert not Path(public_build["executable_path"]).is_absolute()
 
         response = client.post(
             "/api/runs",
@@ -759,7 +828,9 @@ def test_runtime_repository_configuration_is_required_for_branch_runs(settings) 
     with TestClient(create_app(settings, FakeSimulationRunner())) as client:
         repository = client.get("/api/runtime/repository")
         assert repository.status_code == 503
-        assert repository.json()["detail"] == "JSB0 Runtime repository is not configured"
+        assert (
+            repository.json()["detail"] == "JSB0 Runtime repository is not configured"
+        )
         branches = client.get("/api/runtime/branches")
         assert branches.status_code == 503
         response = client.post(
@@ -798,7 +869,9 @@ def test_branch_run_resolves_revision_reuses_build_and_preserves_history(
         assert runtime.status_code == 200
         assert runtime.json()["id"] == registered.id
         assert runtime.json()["key"] == "jsb0"
-        assert {item["name"] for item in client.get("/api/runtime/branches").json()} >= {
+        assert {
+            item["name"] for item in client.get("/api/runtime/branches").json()
+        } >= {
             "backend",
             "main",
         }
@@ -876,7 +949,10 @@ def test_branch_run_resolves_revision_reuses_build_and_preserves_history(
         )
         assert legacy.status_code == 202
         assert legacy.json()["build_reused"] is True
-        assert wait_for_terminal(client, legacy.json()["id"])["run"]["repository_id"] == registered.id
+        assert (
+            wait_for_terminal(client, legacy.json()["id"])["run"]["repository_id"]
+            == registered.id
+        )
 
         (source / "version.txt").write_text("backend-v2\n", encoding="utf-8")
         git("add", ".", cwd=source)
@@ -892,8 +968,16 @@ def test_branch_run_resolves_revision_reuses_build_and_preserves_history(
         advanced_payload = advanced.json()
         assert advanced_payload["commit_sha"] == backend_v2
         assert advanced_payload["build_id"] != baseline_payload["build_id"]
-        assert client.get(f"/api/runs/{baseline_payload['id']}").json()["run"]["commit_sha"] == backend_v1
-        assert wait_for_terminal(client, advanced_payload["id"])["run"]["status"] == "completed"
+        assert (
+            client.get(f"/api/runs/{baseline_payload['id']}").json()["run"][
+                "commit_sha"
+            ]
+            == backend_v1
+        )
+        assert (
+            wait_for_terminal(client, advanced_payload["id"])["run"]["status"]
+            == "completed"
+        )
 
 
 def test_roll_hold_controller_parameters_are_validated_frozen_and_delivered(
@@ -979,7 +1063,9 @@ def test_roll_hold_controller_parameters_are_validated_frozen_and_delivered(
             },
         )
         second_detail = wait_for_terminal(client, second.json()["id"])
-        assert second_detail["run"]["scenario_sha256"] == detail["run"]["scenario_sha256"]
+        assert (
+            second_detail["run"]["scenario_sha256"] == detail["run"]["scenario_sha256"]
+        )
         assert second_detail["run"]["controller_parameters"]["FW_RR_P"] == 0.12
 
         ignored_legacy_variant = client.post(
@@ -1077,8 +1163,12 @@ def test_comparison_resolves_once_reuses_one_build_and_tracks_variants(
             build_calls += 1
             return original_build(*args, **kwargs)
 
-        monkeypatch.setattr(client.app.state.repository_manager, "resolve_branch", counted_resolve)
-        monkeypatch.setattr(client.app.state.build_manager, "request_resolved", counted_build)
+        monkeypatch.setattr(
+            client.app.state.repository_manager, "resolve_branch", counted_resolve
+        )
+        monkeypatch.setattr(
+            client.app.state.build_manager, "request_resolved", counted_build
+        )
 
         response = client.post(
             "/api/comparisons",
@@ -1099,6 +1189,7 @@ def test_comparison_resolves_once_reuses_one_build_and_tracks_variants(
         ]
         run_ids = [item["run_id"] for item in payload["runs"]]
         details = [wait_for_terminal(client, run_id) for run_id in run_ids]
+        assert resolve_calls == 1
         assert {item["run"]["execution_variant"] for item in details} == {
             "baseline",
             "primary",
@@ -1109,17 +1200,21 @@ def test_comparison_resolves_once_reuses_one_build_and_tracks_variants(
         assert all(item["run"]["comparison_id"] == payload["id"] for item in details)
         comparison = client.get(f"/api/comparisons/{payload['id']}")
         assert comparison.json()["status"] == "completed"
-        comparison_scenario = client.get(
-            f"/api/comparisons/{payload['id']}/scenario"
-        )
+        comparison_scenario = client.get(f"/api/comparisons/{payload['id']}/scenario")
         assert comparison_scenario.status_code == 200
         assert comparison_scenario.json()["source"] == "run_snapshot"
         assert comparison_scenario.json()["provenance"]["authority"] == (
             "frozen comparison snapshot"
         )
         assert comparison_scenario.json()["provenance"]["integrity"] == "verified"
-        snapshot_bytes = Path(comparison.json()["scenario_path"]).read_bytes()
-        assert all(Path(item["run"]["scenario_path"]).read_bytes() == snapshot_bytes for item in details)
+        snapshot_bytes = (
+            settings.data_dir / comparison.json()["scenario_path"]
+        ).read_bytes()
+        assert all(
+            (settings.data_dir / item["run"]["scenario_path"]).read_bytes()
+            == snapshot_bytes
+            for item in details
+        )
         assert runner.variants_used[-2:] == ["baseline", "primary"]
 
         duplicate = client.post(

@@ -10,8 +10,10 @@ requires-python = ">=3.11"
 dependencies = [
   "matplotlib>=3.9,<4",
   "mcap>=1.2,<2",
+  "mcap-protobuf-support>=0.5,<1",
   "numpy>=2.0,<3",
   "pandas>=2.2,<4",
+  "PyYAML>=6,<7",
   "scipy>=1.14,<2",
 ]
 
@@ -30,4 +32,3 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-

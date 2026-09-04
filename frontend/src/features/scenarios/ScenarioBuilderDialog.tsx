@@ -98,7 +98,7 @@ const ROLL_HOLD_TEST: RollHoldDraft = {
   dtSec: 0.01,
   commandTimeSec: 5,
   commandRollDeg: 5,
-  controllerParameterIds: ["FW_R_TC", "FW_RR_P", "FW_RR_I", "FW_RR_D", "FW_RR_FF", "FW_RR_IMAX"],
+  controllerParameterIds: [],
   settlingBandDeg: 0.1,
   settlingTimeLimitSec: 20,
   overshootLimitDeg: 5,
@@ -234,11 +234,17 @@ export function ScenarioBuilderDialog({
     setParametersLoading(true);
     setParametersResolved(false);
     setParametersError(null);
-    api.runtimeParameters("main")
+    api.runtimeParameters()
       .then((catalog) => {
         if (!active) return;
         const definitions = catalog.parameters ?? [];
         setParameterDefinitions(definitions);
+        setDraft((current) => ({
+          ...current,
+          controllerParameterIds: current.controllerParameterIds.length > 0
+            ? current.controllerParameterIds
+            : definitions.map((item) => item.id),
+        }));
       })
       .catch((reason: unknown) => {
         if (active) setParametersError(reason instanceof Error ? reason.message : "Could not load controller parameters");
@@ -321,7 +327,7 @@ export function ScenarioBuilderDialog({
     const supported = new Set(parameterDefinitions.map((item) => item.id));
     return draft.controllerParameterIds
       .filter((id) => !supported.has(id))
-      .map((id) => `Unsupported controller parameter for JSB0 main: ${id}`);
+      .map((id) => `Unsupported controller parameter for the configured JSB0 contract: ${id}`);
   }, [draft.controllerParameterIds, parameterDefinitions, parametersError, parametersResolved]);
 
   const sectionPanel: Record<BuilderSectionId, React.ReactNode> = {
@@ -353,7 +359,7 @@ export function ScenarioBuilderDialog({
     </section>,
     environment: <section className="scenario-builder-section" aria-labelledby="scenario-builder-section-environment">
       <h3 id="scenario-builder-section-environment">Environment</h3>
-      <Checkbox checked={draft.windEnabled} disabled label="Wind enabled (JSB0 main currently requires disabled)" />
+      <Checkbox checked={draft.windEnabled} disabled label="Wind enabled (the selected contract currently requires disabled)" />
     </section>,
     trim: <section className="scenario-builder-section" aria-labelledby="scenario-builder-section-trim">
       <h3 id="scenario-builder-section-trim">Trim</h3>
@@ -443,7 +449,7 @@ export function ScenarioBuilderDialog({
       <div className="scenario-builder-validation" aria-live="polite">
         {validation == null && <Callout compact intent={Intent.NONE}>Modified · Needs validation</Callout>}
         {validation?.valid && <Callout compact intent={Intent.SUCCESS}>
-          Valid against JSB0 {validation.runtime?.branch ?? "main"} @ {validation.runtime?.commit.slice(0, 12)}
+          Valid against JSB0 {validation.runtime?.branch ?? "configured revision"} @ {validation.runtime?.commit.slice(0, 12)}
         </Callout>}
         {validation && !validation.valid && <Callout compact intent={Intent.DANGER} title="Scenario is invalid">
           <ul>{validation.errors.map((item, index) => <li key={`${item.path}-${index}`}><code>{item.path}</code>: {item.message}</li>)}</ul>

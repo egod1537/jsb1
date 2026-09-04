@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import numpy as np
+from jsb1_analysis.metrics.primitives import (
+    absolute_overshoot,
+    peak_absolute,
+    rms_error,
+    settling_time,
+    steady_state_error,
+)
 from numpy.typing import ArrayLike
 
 from app.domain.models import Metric
-
 
 RAD_TO_DEG = 180.0 / np.pi
 SETTLING_BAND_DEG = 0.5
@@ -31,36 +37,26 @@ def compute_roll_hold_metrics(
     )
     if np.any(np.diff(time) < 0):
         raise ValueError("time must be monotonic")
-    command_deg = command * RAD_TO_DEG
-    roll_deg = roll * RAD_TO_DEG
-    aileron_deg = aileron * RAD_TO_DEG
-    onset_candidates = np.flatnonzero(np.abs(command_deg - command_deg[0]) > 1e-6)
+    onset_candidates = np.flatnonzero(np.abs(command - command[0]) > 1e-9)
     onset = int(onset_candidates[0]) if onset_candidates.size else 0
-    error = command_deg - roll_deg
-    post_error = error[onset:]
-
-    settled = np.abs(post_error) <= SETTLING_BAND_DEG
-    suffix_settled = np.logical_and.accumulate(settled[::-1])[::-1]
-    settling_candidates = np.flatnonzero(suffix_settled)
-    settling_time: float | None = (
-        float(time[onset + settling_candidates[0]] - time[onset])
-        if settling_candidates.size
-        else None
+    error = command - roll
+    settling = settling_time(
+        time,
+        error,
+        band=SETTLING_BAND_DEG / RAD_TO_DEG,
+        onset=onset,
     )
-
-    target_delta = command_deg[-1] - command_deg[0]
-    direction = 1.0 if target_delta >= 0 else -1.0
-    overshoot = max(
-        0.0,
-        float(np.max(direction * (roll_deg[onset:] - command_deg[onset:]))),
-    )
-    rms = float(np.sqrt(np.mean(np.square(post_error))))
-    steady_count = max(1, int(np.ceil(len(error) * STEADY_STATE_FRACTION)))
-    steady_error = float(abs(np.mean(error[-steady_count:])))
-    max_aileron = float(np.max(np.abs(aileron_deg)))
+    overshoot = absolute_overshoot(command, roll, onset=onset) * RAD_TO_DEG
+    rms = rms_error(command[onset:], roll[onset:]) * RAD_TO_DEG
+    steady_error = steady_state_error(
+        command,
+        roll,
+        fraction=STEADY_STATE_FRACTION,
+    ) * RAD_TO_DEG
+    max_aileron = peak_absolute(aileron) * RAD_TO_DEG
 
     return [
-        Metric(name="settling_time_sec", value=settling_time, unit="s"),
+        Metric(name="settling_time_sec", value=settling, unit="s"),
         Metric(name="overshoot_deg", value=overshoot, unit="deg"),
         Metric(name="rms_error_deg", value=rms, unit="deg"),
         Metric(name="steady_state_error_deg", value=steady_error, unit="deg"),

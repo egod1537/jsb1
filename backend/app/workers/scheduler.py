@@ -6,7 +6,6 @@ from typing import Protocol
 
 from app.workers.build_scheduler import InProcessBuildScheduler
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -15,7 +14,7 @@ class RunExecutor(Protocol):
 
 
 class InProcessRunScheduler:
-    """Small single-process queue boundary, replaceable by an external queue later."""
+    """Concurrency gate for claimed work; durable DB rows remain the queue."""
 
     def __init__(
         self,

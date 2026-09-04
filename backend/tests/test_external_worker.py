@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
+import pytest
 from fastapi.testclient import TestClient
 
-from app.main import create_app
 from app.domain.build import BuildStatus
+from app.infrastructure.execution import WorkerProcessLock
+from app.main import create_app
 from app.repositories.database import Database
 from app.repositories.runs import RunRepository
 from app.worker import create_worker
@@ -70,6 +73,26 @@ def test_api_restart_preserves_durable_queue_and_worker_executes(settings) -> No
     assert RunRepository(database).get(run_id).status.value == "completed"
 
 
+def test_embedded_restart_reschedules_durable_queued_run(settings) -> None:
+    external = settings.model_copy(update={"execution_mode": "external"})
+    with TestClient(create_app(external)) as client:
+        response = client.post(
+            "/api/runs",
+            json={"scenario": "roll_hold_5deg.yaml", "commit_sha": "abc123"},
+        )
+        run_id = response.json()["id"]
+        assert client.get(f"/api/runs/{run_id}").json()["run"]["status"] == "queued"
+
+    with TestClient(create_app(settings, FakeSimulationRunner())) as restarted:
+        for _ in range(100):
+            run = restarted.get(f"/api/runs/{run_id}").json()["run"]
+            if run["status"] in {"completed", "failed"}:
+                break
+            time.sleep(0.01)
+
+    assert run["status"] == "completed"
+
+
 def test_worker_waits_for_build_before_dispatching_run() -> None:
     builds = QueueBuilds()
     runs = QueueRuns()
@@ -90,3 +113,19 @@ def test_worker_waits_for_build_before_dispatching_run() -> None:
     runs.build_status = BuildStatus.COMPLETED.value
     worker.tick()
     assert run_scheduler.submitted == [11]
+
+
+def test_worker_process_lock_rejects_a_second_worker(tmp_path) -> None:
+    path = tmp_path / "worker" / "execution-worker.lock"
+    first = WorkerProcessLock(path)
+    second = WorkerProcessLock(path)
+
+    first.acquire()
+    try:
+        with pytest.raises(RuntimeError, match="another execution worker"):
+            second.acquire()
+    finally:
+        first.release()
+
+    second.acquire()
+    second.release()

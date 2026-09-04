@@ -21,6 +21,7 @@ const definitions = [{
   maximum: 10,
   increment: 0.005,
   description: "Roll-rate proportional gain.",
+  module: "flight.roll",
   variants: ["baseline"],
 }, {
   id: "CUSTOM_P_GAIN",
@@ -36,12 +37,12 @@ const definitions = [{
 }];
 
 const rollHoldDefinitions = [
-  { id: "FW_R_TC", display_name: "Roll Time Constant", category: "Attitude", unit: "s", default_value: 0.4, minimum: 0.2, maximum: 1, variants: ["baseline"] },
-  { ...definitions[0], category: "Rate" },
-  { id: "FW_RR_I", display_name: "Roll Rate I", group: "Rate", default_value: 0.1, minimum: 0, maximum: 10, variants: ["baseline"] },
-  { id: "FW_RR_D", display_name: "Roll Rate D", group: "Rate", default_value: 0, minimum: 0, maximum: 10, variants: ["baseline"] },
-  { id: "FW_RR_FF", display_name: "Roll Rate Feed Forward", group: "Rate", default_value: 0.5, minimum: 0, maximum: 10, variants: ["baseline"] },
-  { id: "FW_RR_IMAX", display_name: "Roll Integrator Limit", group: "Control", default_value: 0.2, minimum: 0, maximum: 1, variants: ["baseline"] },
+  { id: "FW_R_TC", display_name: "Roll Time Constant", module: "flight.roll", unit: "s", default_value: 0.4, minimum: 0.2, maximum: 1, variants: ["baseline"] },
+  definitions[0],
+  { id: "FW_RR_I", display_name: "Roll Rate I", module: "flight.roll", default_value: 0.1, minimum: 0, maximum: 10, variants: ["baseline"] },
+  { id: "FW_RR_D", display_name: "Roll Rate D", module: "flight.roll", default_value: 0, minimum: 0, maximum: 10, variants: ["baseline"] },
+  { id: "FW_RR_FF", display_name: "Roll Rate Feed Forward", module: "flight.roll", default_value: 0.5, minimum: 0, maximum: 10, variants: ["baseline"] },
+  { id: "FW_RR_IMAX", display_name: "Roll Integrator Limit", module: "flight.roll", default_value: 0.2, minimum: 0, maximum: 1, variants: ["baseline"] },
 ];
 
 afterEach(cleanup);
@@ -144,7 +145,7 @@ describe("ControllerParameterConfigureDialog", () => {
     expect(window.getComputedStyle(sidebar).flexBasis).toBe("200px");
     expect(window.getComputedStyle(sidebar).flexShrink).toBe("0");
     expect(window.getComputedStyle(grid).gridTemplateColumns).toBe("repeat(2, minmax(300px, 1fr))");
-    expect(window.getComputedStyle(within(preset).getByText("PX4 Default")).whiteSpace).toBe("nowrap");
+    expect(window.getComputedStyle(within(preset).getByText("Runtime Default")).whiteSpace).toBe("nowrap");
   });
 
   it("validates on blur and Apply without closing, resets defaults, and discards Cancelled drafts", () => {

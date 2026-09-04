@@ -11,8 +11,7 @@ from app.api.routes import router
 from app.config.settings import Settings, get_settings
 from app.container import bootstrap_application
 from app.services.build_info import load_build_info
-from app.services.runner import SimulationRunner
-
+from app.services.ports import SimulationRunner
 
 logging.basicConfig(
     level=logging.INFO,

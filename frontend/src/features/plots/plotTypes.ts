@@ -1,4 +1,7 @@
 import type { SignalMetadata, SignalResponse } from "../../types/api";
+import type { TimelineState } from "../../types/view";
+
+export type { TimelineState } from "../../types/view";
 
 export const PLOT_LAYOUTS = {
   "1x1": { columns: 1, rows: 1, capacity: 1, rowHeight: 560 },
@@ -61,13 +64,6 @@ export interface PlotSettingsValue {
   signals: SignalReference[];
   yAxis: PlotYAxis;
   showLegend: boolean;
-}
-
-export interface TimelineState {
-  visibleStart: number;
-  visibleEnd: number;
-  cursorTime: number | null;
-  selectedRange: [number, number] | null;
 }
 
 export interface WorkspaceTelemetry extends SignalResponse {

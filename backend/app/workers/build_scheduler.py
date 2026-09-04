@@ -4,8 +4,6 @@ import asyncio
 import logging
 from typing import Protocol
 
-
-
 logger = logging.getLogger(__name__)
 
 
@@ -14,6 +12,8 @@ class BuildExecutor(Protocol):
 
 
 class InProcessBuildScheduler:
+    """Bound build subprocess concurrency without becoming a durable queue."""
+
     def __init__(self, manager: BuildExecutor, max_concurrent_builds: int) -> None:
         self.manager = manager
         self._semaphore = asyncio.Semaphore(max_concurrent_builds)

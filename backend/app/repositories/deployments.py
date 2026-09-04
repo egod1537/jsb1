@@ -3,25 +3,27 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterable
 
-from app.domain.deployment import BranchDeployment, DeploymentStatus
+from app.domain.clock import utc_now
+from app.domain.deployment import (
+    DEPLOYMENT_STATUS_TRANSITIONS,
+    BranchDeployment,
+    DeploymentStatus,
+)
+from app.domain.errors import (
+    DeploymentConflict,
+    InvalidDeploymentTransition,
+    NoDeploymentPortAvailable,
+)
+from app.domain.lifecycle import ensure_transition
 from app.repositories.database import Database
-from app.repositories.runs import utc_now
-
-
-class DeploymentConflict(RuntimeError):
-    pass
-
-
-class InvalidDeploymentTransition(RuntimeError):
-    pass
-
-
-class NoDeploymentPortAvailable(RuntimeError):
-    pass
 
 
 class DeploymentRepository:
-    ACTIVE = (DeploymentStatus.QUEUED, DeploymentStatus.STARTING, DeploymentStatus.RUNNING)
+    ACTIVE = (
+        DeploymentStatus.QUEUED,
+        DeploymentStatus.STARTING,
+        DeploymentStatus.RUNNING,
+    )
 
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -86,7 +88,7 @@ class DeploymentRepository:
         parameters.append(limit)
         with self.database.connect() as connection:
             rows = connection.execute(
-                f"SELECT * FROM deployments {where} ORDER BY id DESC LIMIT ?",  # noqa: S608
+                f"SELECT * FROM deployments {where} ORDER BY id DESC LIMIT ?",
                 parameters,
             ).fetchall()
         return [BranchDeployment.model_validate(dict(row)) for row in rows]
@@ -157,7 +159,9 @@ class DeploymentRepository:
         unavailable_ports: set[int] | None = None,
     ) -> BranchDeployment:
         if port_end - port_start < 1:
-            raise NoDeploymentPortAvailable("deployment port range must contain two ports")
+            raise NoDeploymentPortAvailable(
+                "deployment port range must contain two ports"
+            )
         timestamp = utc_now()
         with self.database.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -181,7 +185,9 @@ class DeploymentRepository:
                 for port in (used_row["frontend_port"], used_row["backend_port"])
                 if port is not None
             }
-            available = [port for port in range(port_start, port_end + 1) if port not in used]
+            available = [
+                port for port in range(port_start, port_end + 1) if port not in used
+            ]
             if len(available) < 2:
                 raise NoDeploymentPortAvailable("no deployment port pair is available")
             frontend_port, backend_port = available[:2]
@@ -206,9 +212,18 @@ class DeploymentRepository:
         status: DeploymentStatus,
         error_message: str | None = None,
     ) -> BranchDeployment:
-        expected_values = [item.value for item in expected]
-        if not expected_values:
+        expected_statuses = tuple(expected)
+        if not expected_statuses:
             raise ValueError("expected statuses must not be empty")
+        for current in expected_statuses:
+            ensure_transition(
+                current,
+                status,
+                DEPLOYMENT_STATUS_TRANSITIONS,
+                entity="deployment",
+                error_type=InvalidDeploymentTransition,
+            )
+        expected_values = [item.value for item in expected_statuses]
         timestamp = utc_now()
         assignments = ["status = ?", "updated_at = ?", "error_message = ?"]
         values: list[object] = [status.value, timestamp, error_message]
@@ -221,8 +236,8 @@ class DeploymentRepository:
         placeholders = ", ".join("?" for _ in expected_values)
         with self.database.connect() as connection:
             cursor = connection.execute(
-                f"""UPDATE deployments SET {', '.join(assignments)}
-                    WHERE id = ? AND status IN ({placeholders})""",  # noqa: S608
+                f"""UPDATE deployments SET {", ".join(assignments)}
+                    WHERE id = ? AND status IN ({placeholders})""",
                 [*values, deployment_id, *expected_values],
             )
             if cursor.rowcount != 1:

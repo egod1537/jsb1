@@ -1,21 +1,30 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
-from datetime import datetime, timezone
 import json
+from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any
 
-from app.domain.models import Metric, Run, RunStatus, RunSummary
+from app.domain.artifacts import StoredArtifact
+from app.domain.clock import utc_now
+from app.domain.errors import InvalidStatusTransition
+from app.domain.execution import FrozenRunPreparation
+from app.domain.lifecycle import ensure_transition
+from app.domain.models import (
+    RUN_STATUS_TRANSITIONS,
+    Metric,
+    Run,
+    RunStatus,
+    RunSummary,
+)
 from app.domain.pipeline import PipelineStage
 from app.repositories.database import Database
 
 
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-class InvalidStatusTransition(RuntimeError):
-    pass
+@dataclass(frozen=True)
+class RunDeletionResult:
+    deleted: bool
+    orphaned_comparison_id: int | None = None
 
 
 class RunRepository:
@@ -43,6 +52,7 @@ class RunRepository:
         execution_mode: str = "single",
         variants: list[str] | None = None,
         variant_parameters: dict[str, dict[str, float]] | None = None,
+        contract_version: str | None = None,
     ) -> Run:
         with self.database.connect() as connection:
             cursor = connection.execute(
@@ -51,8 +61,9 @@ class RunRepository:
                     scenario_type, scenario_path, autopilot, execution_variant,
                     comparison_id, scenario_id, scenario_source, scenario_sha256,
                     controller_parameters, controller_parameter_overrides,
-                    execution_mode, variants, variant_parameters, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    execution_mode, variants, variant_parameters, contract_version,
+                    created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     RunStatus.QUEUED.value,
                     repository_id,
@@ -69,27 +80,21 @@ class RunRepository:
                     scenario_source,
                     scenario_sha256,
                     json.dumps(controller_parameters or {}, separators=(",", ":")),
-                    json.dumps(controller_parameter_overrides or {}, separators=(",", ":")),
+                    json.dumps(
+                        controller_parameter_overrides or {}, separators=(",", ":")
+                    ),
                     execution_mode,
-                    json.dumps(variants or [execution_variant or autopilot], separators=(",", ":")),
+                    json.dumps(
+                        variants or [execution_variant or autopilot],
+                        separators=(",", ":"),
+                    ),
                     json.dumps(variant_parameters or {}, separators=(",", ":")),
+                    contract_version,
                     utc_now(),
                 ),
             )
             run_id = int(cursor.lastrowid)
         return self.get(run_id)
-
-    def fail_incomplete_from_previous_process(self) -> int:
-        """An in-memory queue cannot resume work after a process restart."""
-        with self.database.connect() as connection:
-            cursor = connection.execute(
-                """UPDATE runs
-                   SET status = 'failed', finished_at = ?,
-                       error_message = 'backend restarted before run completed'
-                   WHERE status IN ('queued', 'running')""",
-                (utc_now(),),
-            )
-            return cursor.rowcount
 
     def ids_with_statuses(self, statuses: Iterable[RunStatus]) -> list[int]:
         values = [status.value for status in statuses]
@@ -98,7 +103,7 @@ class RunRepository:
         placeholders = ", ".join("?" for _ in values)
         with self.database.connect() as connection:
             rows = connection.execute(
-                f"SELECT id FROM runs WHERE status IN ({placeholders}) ORDER BY id",  # noqa: S608
+                f"SELECT id FROM runs WHERE status IN ({placeholders}) ORDER BY id",
                 values,
             ).fetchall()
         return [int(row["id"]) for row in rows]
@@ -126,14 +131,12 @@ class RunRepository:
                    FROM runs
                    LEFT JOIN builds ON builds.id = runs.build_id
                    WHERE runs.status = 'queued'
+                     AND runs.output_directory IS NOT NULL
                    ORDER BY runs.id
                    LIMIT ?""",
                 (limit,),
             ).fetchall()
-        return [
-            (int(row["id"]), row["build_status"])
-            for row in rows
-        ]
+        return [(int(row["id"]), row["build_status"]) for row in rows]
 
     def get(self, run_id: int) -> Run:
         with self.database.connect() as connection:
@@ -183,30 +186,42 @@ class RunRepository:
                     {where} ORDER BY runs.id DESC LIMIT ?""",
                 parameters,
             ).fetchall()
-        return [RunSummary.model_validate(self._with_json_fields(dict(row))) for row in rows]
+        return [
+            RunSummary.model_validate(self._with_json_fields(dict(row))) for row in rows
+        ]
 
-    def set_variant_metadata(
+    def record_runtime_ingestion(
         self,
         run_id: int,
         *,
-        execution_mode: str,
-        variants: list[str],
         results: dict[str, dict[str, object]],
-        parameters: dict[str, dict[str, float]] | None = None,
+        artifacts: Iterable[StoredArtifact],
     ) -> None:
         with self.database.connect() as connection:
             connection.execute(
-                """UPDATE runs
-                   SET execution_mode = ?, variants = ?, variant_results = ?,
-                       variant_parameters = ?
-                   WHERE id = ?""",
+                "UPDATE runs SET variant_results = ? WHERE id = ?",
                 (
-                    execution_mode,
-                    json.dumps(variants, separators=(",", ":")),
                     json.dumps(results, separators=(",", ":")),
-                    json.dumps(parameters or {}, separators=(",", ":")),
                     run_id,
                 ),
+            )
+            connection.executemany(
+                """INSERT INTO artifacts(run_id, kind, path, sha256, size_bytes)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(run_id, kind) DO UPDATE SET
+                     path = excluded.path,
+                     sha256 = excluded.sha256,
+                     size_bytes = excluded.size_bytes""",
+                [
+                    (
+                        run_id,
+                        artifact.kind,
+                        artifact.relative_path,
+                        artifact.sha256,
+                        artifact.size_bytes,
+                    )
+                    for artifact in artifacts
+                ],
             )
 
     def set_pipeline(
@@ -226,19 +241,67 @@ class RunRepository:
                 (current_stage, payload, run_id),
             )
 
-    def set_output_directory(self, run_id: int, relative_path: str) -> None:
+    def finalize_preparation(
+        self,
+        run_id: int,
+        *,
+        scenario_path: str,
+        scenario_sha256: str,
+        output_directory: str,
+        parameter_snapshot_path: str | None,
+        parameter_snapshot_sha256: str | None,
+        artifacts: Iterable[StoredArtifact],
+    ) -> Run:
+        """Atomically expose all frozen inputs as ready for worker claim."""
+        preparation = FrozenRunPreparation(
+            run_id=run_id,
+            scenario_path=scenario_path,
+            scenario_sha256=scenario_sha256,
+            output_directory=output_directory,
+            parameter_snapshot_path=parameter_snapshot_path,
+            parameter_snapshot_sha256=parameter_snapshot_sha256,
+            artifacts=tuple(artifacts),
+        )
         with self.database.connect() as connection:
-            connection.execute(
-                "UPDATE runs SET output_directory = ? WHERE id = ?",
-                (relative_path, run_id),
+            cursor = connection.execute(
+                """UPDATE runs
+                   SET scenario_path = ?, scenario_sha256 = ?,
+                       parameter_snapshot_path = ?, parameter_snapshot_sha256 = ?,
+                       output_directory = ?
+                   WHERE id = ? AND status = ? AND output_directory IS NULL""",
+                (
+                    scenario_path,
+                    scenario_sha256,
+                    parameter_snapshot_path,
+                    parameter_snapshot_sha256,
+                    output_directory,
+                    run_id,
+                    RunStatus.QUEUED.value,
+                ),
             )
-
-    def set_scenario_path(self, run_id: int, scenario_path: str) -> None:
-        with self.database.connect() as connection:
-            connection.execute(
-                "UPDATE runs SET scenario_path = ? WHERE id = ?",
-                (scenario_path, run_id),
+            if cursor.rowcount != 1:
+                raise InvalidStatusTransition(
+                    f"run {run_id} cannot finalize execution preparation"
+                )
+            connection.executemany(
+                """INSERT INTO artifacts(run_id, kind, path, sha256, size_bytes)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(run_id, kind) DO UPDATE SET
+                     path = excluded.path,
+                     sha256 = excluded.sha256,
+                     size_bytes = excluded.size_bytes""",
+                [
+                    (
+                        run_id,
+                        artifact.kind,
+                        artifact.relative_path,
+                        artifact.sha256,
+                        artifact.size_bytes,
+                    )
+                    for artifact in preparation.artifacts
+                ],
             )
+        return self.get(run_id)
 
     def transition(
         self,
@@ -248,9 +311,40 @@ class RunRepository:
         status: RunStatus,
         **fields: Any,
     ) -> Run:
+        expected_statuses = tuple(expected)
+        if not expected_statuses:
+            raise InvalidStatusTransition("expected run statuses must not be empty")
+        for current in expected_statuses:
+            ensure_transition(
+                current,
+                status,
+                RUN_STATUS_TRANSITIONS,
+                entity="run",
+            )
+        permitted_fields = {
+            RunStatus.RUNNING: {"started_at"},
+            RunStatus.COMPLETED: {
+                "finished_at",
+                "exit_code",
+                "wall_time_sec",
+                "simulation_time_sec",
+                "error_message",
+            },
+            RunStatus.FAILED: {
+                "finished_at",
+                "exit_code",
+                "wall_time_sec",
+                "error_message",
+            },
+        }[status]
+        unexpected_fields = set(fields) - permitted_fields
+        if unexpected_fields:
+            raise ValueError(
+                "invalid lifecycle fields: " + ", ".join(sorted(unexpected_fields))
+            )
         values = {"status": status.value, **fields}
         assignments = ", ".join(f"{name} = ?" for name in values)
-        expected_values = [item.value for item in expected]
+        expected_values = [item.value for item in expected_statuses]
         placeholders = ", ".join("?" for _ in expected_values)
         with self.database.connect() as connection:
             cursor = connection.execute(
@@ -258,15 +352,85 @@ class RunRepository:
                 [*values.values(), run_id, *expected_values],
             )
             if cursor.rowcount != 1:
-                raise InvalidStatusTransition(f"invalid transition for run {run_id} to {status}")
+                raise InvalidStatusTransition(
+                    f"invalid transition for run {run_id} to {status}"
+                )
         return self.get(run_id)
+
+    def mark_running(self, run_id: int, *, started_at: str) -> Run:
+        return self.transition(
+            run_id,
+            expected=[RunStatus.QUEUED],
+            status=RunStatus.RUNNING,
+            started_at=started_at,
+        )
+
+    def claim_for_execution(self, run_id: int, *, started_at: str) -> Run | None:
+        """Atomically claim one queued Run; duplicate workers receive ``None``."""
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                """UPDATE runs SET status = ?, started_at = ?
+                   WHERE id = ? AND status = ? AND output_directory IS NOT NULL""",
+                (
+                    RunStatus.RUNNING.value,
+                    started_at,
+                    run_id,
+                    RunStatus.QUEUED.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+        return self.get(run_id)
+
+    def complete_run(
+        self,
+        run_id: int,
+        *,
+        finished_at: str,
+        exit_code: int,
+        wall_time_sec: float,
+        simulation_time_sec: float | None,
+        error_message: str | None = None,
+    ) -> Run:
+        return self.transition(
+            run_id,
+            expected=[RunStatus.RUNNING],
+            status=RunStatus.COMPLETED,
+            finished_at=finished_at,
+            exit_code=exit_code,
+            wall_time_sec=wall_time_sec,
+            simulation_time_sec=simulation_time_sec,
+            error_message=error_message,
+        )
+
+    def fail_run(
+        self,
+        run_id: int,
+        *,
+        finished_at: str,
+        error_message: str,
+        exit_code: int | None = None,
+        wall_time_sec: float | None = None,
+    ) -> Run:
+        return self.transition(
+            run_id,
+            expected=[RunStatus.QUEUED, RunStatus.RUNNING],
+            status=RunStatus.FAILED,
+            finished_at=finished_at,
+            exit_code=exit_code,
+            wall_time_sec=wall_time_sec,
+            error_message=error_message,
+        )
 
     def replace_metrics(self, run_id: int, metrics: Iterable[Metric]) -> None:
         with self.database.connect() as connection:
             connection.execute("DELETE FROM metrics WHERE run_id = ?", (run_id,))
             connection.executemany(
                 "INSERT INTO metrics(run_id, name, value, unit) VALUES (?, ?, ?, ?)",
-                [(run_id, metric.name, metric.value, metric.unit) for metric in metrics],
+                [
+                    (run_id, metric.name, metric.value, metric.unit)
+                    for metric in metrics
+                ],
             )
 
     def get_metrics(self, run_id: int) -> list[Metric]:
@@ -277,18 +441,37 @@ class RunRepository:
             ).fetchall()
         return [Metric.model_validate(dict(row)) for row in rows]
 
-    def upsert_artifact(self, run_id: int, kind: str, relative_path: str) -> None:
+    def record_artifact(self, run_id: int, artifact: StoredArtifact) -> None:
+        self.record_artifacts(run_id, (artifact,))
+
+    def record_artifacts(
+        self, run_id: int, artifacts: Iterable[StoredArtifact]
+    ) -> None:
         with self.database.connect() as connection:
-            connection.execute(
-                """INSERT INTO artifacts(run_id, kind, path) VALUES (?, ?, ?)
-                   ON CONFLICT(run_id, kind) DO UPDATE SET path = excluded.path""",
-                (run_id, kind, relative_path),
+            connection.executemany(
+                """INSERT INTO artifacts(run_id, kind, path, sha256, size_bytes)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(run_id, kind) DO UPDATE SET
+                     path = excluded.path,
+                     sha256 = excluded.sha256,
+                     size_bytes = excluded.size_bytes""",
+                [
+                    (
+                        run_id,
+                        artifact.kind,
+                        artifact.relative_path,
+                        artifact.sha256,
+                        artifact.size_bytes,
+                    )
+                    for artifact in artifacts
+                ],
             )
 
     def get_artifact_rows(self, run_id: int) -> list[dict[str, Any]]:
         with self.database.connect() as connection:
             rows = connection.execute(
-                "SELECT id, run_id, kind, path FROM artifacts WHERE run_id = ? ORDER BY id",
+                """SELECT id, run_id, kind, path, sha256, size_bytes
+                   FROM artifacts WHERE run_id = ? ORDER BY id""",
                 (run_id,),
             ).fetchall()
         return [dict(row) for row in rows]
@@ -296,21 +479,45 @@ class RunRepository:
     def get_artifact_row(self, run_id: int, kind: str) -> dict[str, Any]:
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT id, run_id, kind, path FROM artifacts WHERE run_id = ? AND kind = ?",
+                """SELECT id, run_id, kind, path, sha256, size_bytes
+                   FROM artifacts WHERE run_id = ? AND kind = ?""",
                 (run_id, kind),
             ).fetchone()
         if row is None:
             raise KeyError((run_id, kind))
         return dict(row)
 
-    def delete_terminal(self, run_id: int) -> bool:
-        """Delete a completed/failed Run and its cascading persistence children."""
+    def delete_terminal(self, run_id: int) -> RunDeletionResult:
+        """Atomically delete a terminal Run and any now-empty Comparison."""
         with self.database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT comparison_id FROM runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            comparison_id = (
+                int(row["comparison_id"])
+                if row is not None and row["comparison_id"] is not None
+                else None
+            )
             cursor = connection.execute(
                 "DELETE FROM runs WHERE id = ? AND status IN ('completed', 'failed')",
                 (run_id,),
             )
-            return cursor.rowcount == 1
+            if cursor.rowcount != 1:
+                return RunDeletionResult(False)
+            orphaned_comparison_id = None
+            if comparison_id is not None:
+                deleted = connection.execute(
+                    """DELETE FROM comparisons
+                       WHERE id = ?
+                         AND NOT EXISTS (
+                           SELECT 1 FROM runs WHERE comparison_id = ?
+                         )""",
+                    (comparison_id, comparison_id),
+                )
+                if deleted.rowcount == 1:
+                    orphaned_comparison_id = comparison_id
+            return RunDeletionResult(True, orphaned_comparison_id)
 
     @staticmethod
     def _with_pipeline(values: dict[str, Any]) -> dict[str, Any]:

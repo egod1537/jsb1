@@ -20,19 +20,29 @@ export function createRunComparisonDataSource(runs: ComparedRunData[]): PlotData
   const labels = runs.map((run) => run.label);
   const runByLabel = new Map(runs.map((run) => [run.label, run]));
   const seriesKey = (runId: number, signal: string) => `run-${runId}/${signal}`;
+  const metadataByName = new Map<string, SignalMetadata>();
+  let metadataRequest: Promise<SignalMetadata[]> | null = null;
+  const loadMetadata = () => {
+    metadataRequest ??= Promise.all(runs.map((run) => api.availableSignals(run.runId))).then((responses) => {
+      for (const response of responses) {
+        for (const signal of response.signals) metadataByName.set(signal.name, signal);
+      }
+      return [...metadataByName.values()].sort((left, right) => left.name.localeCompare(right.name));
+    });
+    return metadataRequest;
+  };
+  const label = (signal: string) => formatSignalName(signal, metadataByName.get(signal));
   return {
     key: `runs-compare-${runs.map((run) => run.runId).join("-")}`,
     variants: labels,
     async listSignals(): Promise<SignalMetadata[]> {
-      const responses = await Promise.all(runs.map((run) => api.availableSignals(run.runId)));
-      const metadata = new Map<string, SignalMetadata>();
-      for (const response of responses) {
-        for (const signal of response.signals) metadata.set(signal.name, signal);
-      }
-      return [...metadata.values()].sort((left, right) => left.name.localeCompare(right.name));
+      return loadMetadata();
     },
     async loadSignals(signals: string[]): Promise<WorkspaceTelemetry> {
-      const responses = await Promise.all(runs.map((run) => loadRunSignalUnion(run.runId, signals, 4000, run.variant)));
+      const [, responses] = await Promise.all([
+        loadMetadata(),
+        Promise.all(runs.map((run) => loadRunSignalUnion(run.runId, signals, 4000, run.variant))),
+      ]);
       const series: Record<string, number[]> = {};
       const seriesTimes: Record<string, number[]> = {};
       const units: Record<string, string> = {};
@@ -64,7 +74,7 @@ export function createRunComparisonDataSource(runs: ComparedRunData[]): PlotData
         if (!values) return [];
         return [{
           key,
-          name: selectedLabel ? formatSignalName(signal) : `${run.label} / ${formatSignalName(signal)}`,
+          name: selectedLabel ? label(signal) : `${run.label} / ${label(signal)}`,
           time: telemetry.seriesTimes?.[key] ?? telemetry.time,
           values,
           unit: telemetry.units[signal],
@@ -74,7 +84,7 @@ export function createRunComparisonDataSource(runs: ComparedRunData[]): PlotData
         const first = resolved[0];
         const identical = resolved.slice(1).every((series) =>
           arraysEqual(first.values, series.values) && arraysEqual(first.time, series.time));
-        if (identical) return [{ ...first, name: formatSignalName(signal) }];
+        if (identical) return [{ ...first, name: label(signal) }];
       }
       return resolved;
     },

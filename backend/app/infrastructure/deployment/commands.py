@@ -11,9 +11,7 @@ class DeploymentCommandError(RuntimeError):
 class ProcessCommandRunner:
     """Launch deployment tools without shell interpolation."""
 
-    def __call__(
-        self, command: list[str], cwd: Path | None, timeout: float
-    ) -> None:
+    def __call__(self, command: list[str], cwd: Path | None, timeout: float) -> None:
         try:
             result = subprocess.run(
                 command,

@@ -4,6 +4,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.domain.identifiers import CommitSha, RepositoryId
+
 
 class RepositoryCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
@@ -22,7 +24,7 @@ class RepositoryCreate(BaseModel):
 class Repository(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    id: int
+    id: RepositoryId
     name: str
     remote_url: str
     local_path: str
@@ -40,7 +42,7 @@ class RepositoryStatus(Repository):
 
 
 class RuntimeRepositoryStatus(BaseModel):
-    id: int
+    id: RepositoryId
     key: str = "jsb0"
     display_name: str
     remote_url: str
@@ -57,14 +59,14 @@ class RuntimeRepositoryStatus(BaseModel):
 
 class Branch(BaseModel):
     name: str
-    commit_sha: str
+    commit_sha: CommitSha
     current: bool = False
     remote: bool = False
 
 
 class Revision(BaseModel):
-    repository_id: int
-    commit_sha: str
+    repository_id: RepositoryId
+    commit_sha: CommitSha
     branch: str | None = None
     commit_message: str
     committed_at: datetime

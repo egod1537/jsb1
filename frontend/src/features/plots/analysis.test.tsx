@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError } from "../../api/client";
-import type { SignalResponse } from "../../types/api";
+import type { SignalMetadata, SignalResponse } from "../../types/api";
 import { RunAnalysisView as AnalysisWorkspace } from "./RunAnalysisView";
 import { createRunComparisonDataSource } from "./runComparisonDataSource";
 import { PLOT_TEMPLATES, validatePlotTemplateRegistry } from "./plotTemplates";
@@ -15,7 +15,7 @@ import {
   validatePresetRegistry,
 } from "./presets";
 import { loadRunSignalUnion } from "./runSignalDataSource";
-import { JSB0_SIGNAL_CATALOG, groupSignalDefinitions } from "./signalCatalog";
+import { groupSignalDefinitions, normalizeSignalMetadata } from "./signalCatalog";
 import { createTimeline, timelineReducer } from "./timelineStore";
 
 vi.mock("../../components/TimeSeriesChart", () => ({
@@ -77,6 +77,16 @@ vi.mock("./SharedTimeline", () => ({
   </footer>,
 }));
 
+const CONTRACT_SIGNALS: SignalMetadata[] = [
+  { name: "commanded_roll", display_name: "Commanded Roll", symbol: "φc", symbol_latex: "\\phi_c", unit: "deg", category: "Command", subcategory: "Roll", description: "Roll demand." },
+  { name: "commanded_roll_rate", display_name: "Commanded Roll Rate", unit: "deg/s", category: "Command", subcategory: "Roll" },
+  { name: "roll", display_name: "Roll", symbol: "φ", symbol_latex: "\\phi", unit: "deg", category: "Aircraft State", subcategory: "Attitude" },
+  { name: "roll_rate", display_name: "Roll Rate", unit: "deg/s", category: "Aircraft State", subcategory: "Angular Rates" },
+  { name: "roll_error", display_name: "Roll Error", unit: "deg", category: "Control", subcategory: "Tracking Error" },
+  { name: "roll_rate_error", display_name: "Roll Rate Error", unit: "deg/s", category: "Control", subcategory: "Tracking Error" },
+  { name: "aileron", display_name: "Aileron", symbol: "δa", symbol_latex: "\\delta_a", unit: "normalized", group: "Control.Surfaces" },
+];
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -107,7 +117,10 @@ const fullTelemetry: SignalResponse = {
 };
 
 function dataSource(telemetry = fullTelemetry) {
-  const metadata = Object.keys(telemetry.series).map((name) => ({ name, unit: telemetry.units[name] ?? "raw" }));
+  const metadata = Object.keys(telemetry.series).map((name) => CONTRACT_SIGNALS.find((signal) => signal.name === name) ?? ({
+    name,
+    unit: telemetry.units[name] ?? "raw",
+  }));
   return {
     key: "run-42",
     loadSignals: vi.fn().mockResolvedValue(telemetry),
@@ -160,8 +173,9 @@ describe("plot workspace model", () => {
     expect(signalUnion(plots)).toEqual(["aileron", "commanded_roll", "commanded_roll_rate", "roll", "roll_rate"]);
   });
 
-  it("covers every JSB0 main RollControlState signal in one categorized catalog", () => {
-    expect(Object.keys(JSB0_SIGNAL_CATALOG).sort()).toEqual([
+  it("maps backend contract signal metadata into the categorized view model", () => {
+    const catalog = CONTRACT_SIGNALS.map(normalizeSignalMetadata);
+    expect(catalog.map((signal) => signal.id).sort()).toEqual([
       "aileron",
       "commanded_roll",
       "commanded_roll_rate",
@@ -170,9 +184,14 @@ describe("plot workspace model", () => {
       "roll_rate",
       "roll_rate_error",
     ]);
-    const groups = groupSignalDefinitions(Object.values(JSB0_SIGNAL_CATALOG));
-    expect(groups.map((group) => group.category)).toEqual(["Command", "Aircraft State", "Control"]);
-    expect(JSB0_SIGNAL_CATALOG.aileron.unit).toBe("normalized");
+    const groups = groupSignalDefinitions(catalog);
+    expect(groups.map((group) => group.category)).toEqual(["Aircraft State", "Command", "Control"]);
+    expect(catalog.find((signal) => signal.id === "aileron")).toMatchObject({
+      category: "Control",
+      subcategory: "Surfaces",
+      unit: "normalized",
+    });
+    expect(catalog.find((signal) => signal.id === "commanded_roll")?.description).toBe("Roll demand.");
   });
 
   it("keeps plot templates separate from workspace presets and validates the registry", () => {
@@ -597,6 +616,8 @@ describe("AnalysisWorkspace", () => {
     expect(row?.querySelector(".signal-symbol")).toHaveAttribute("aria-label", "φ");
     expect(row?.querySelector(".signal-symbol .katex")).not.toBeEmptyDOMElement();
     expect(window.getComputedStyle(row as Element).display).toBe("grid");
+    expect(within(dialog).getByRole("checkbox", { name: /^Commanded Roll .* commanded_roll deg$/i })
+      .closest("label")?.querySelector(".signal-picker-row-content")).toHaveAttribute("title", "Roll demand.");
 
     fireEvent.change(within(dialog).getByLabelText("Search signals"), { target: { value: "phi_c" } });
     expect(within(dialog).getByRole("checkbox", { name: /^Commanded Roll .* commanded_roll deg$/i })).toBeInTheDocument();

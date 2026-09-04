@@ -1,10 +1,57 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app.domain.scenario_validation import ScenarioValidationResult
+from app.domain.scenario_source import ScenarioSourceType
+from app.domain.scenario_validation import ScenarioDocument, ScenarioValidationResult
+
+
+@dataclass(frozen=True)
+class ScenarioSourceContent:
+    """Uninterpreted text and provenance returned by a source adapter."""
+
+    scenario_id: str
+    source: str
+    source_type: ScenarioSourceType
+    yaml_text: str
+    sha256: str
+    modified_at: float | None = None
+
+
+@dataclass(frozen=True)
+class ScenarioDefinition:
+    """Source-independent parsed scenario used by every application workflow."""
+
+    scenario_id: str
+    source: str
+    source_type: ScenarioSourceType
+    document: ScenarioDocument
+    yaml_text: str
+    sha256: str
+    modified_at: float | None = None
+
+    @property
+    def name(self) -> str:
+        return self.document.name or self.scenario_id
+
+    @property
+    def scenario_type(self) -> str | None:
+        return self.document.scenario_type
+
+    @property
+    def legacy_autopilot(self) -> str | None:
+        return self.document.autopilot
+
+    @property
+    def controller_parameters(self) -> tuple[str, ...]:
+        return self.document.controller_parameters
+
+    @property
+    def content(self) -> dict[str, Any]:
+        return self.document.content
 
 
 class ScenarioCatalogEntry(BaseModel):

@@ -172,7 +172,7 @@ export function PlotSettingsDialog({ mode, isOpen, initialPlot, availableSignals
                     className="plot-settings-signal-row"
                     key={signal.id}
                     checked={selectedSignals.includes(signal.id)}
-                    labelElement={<span className="signal-picker-row-content">
+                    labelElement={<span className="signal-picker-row-content" title={signal.description}>
                       <span className="signal-picker-display-name">{signal.displayName}</span>
                       <SignalSymbol latex={signal.symbolLatex} label={signal.symbol} />
                       <code>{signal.id}</code>

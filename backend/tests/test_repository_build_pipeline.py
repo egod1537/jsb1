@@ -5,7 +5,6 @@ import subprocess
 from pathlib import Path
 
 import pytest
-
 from app.domain.build import BuildStatus
 from app.domain.repository import RepositoryCreate
 from app.repositories.builds import BuildRepository
@@ -98,7 +97,10 @@ def test_repository_status_revision_worktrees_and_path_safety(tmp_path: Path) ->
     )
     assert registered.current_branch == "impl"
     assert registered.head_commit == second
-    assert {branch.name for branch in manager.branches(registered.id)} >= {"main", "impl"}
+    assert {branch.name for branch in manager.branches(registered.id)} >= {
+        "main",
+        "impl",
+    }
     assert manager.revision(registered.id, "main").commit_sha == first
     assert manager.revision(registered.id, "impl").commit_message == "commit B"
 
@@ -152,15 +154,28 @@ async def test_build_transitions_cache_failure_and_lineage(
     assert completed.commit_sha == second
     assert completed.current_stage == "complete"
     assert [stage.status.value for stage in completed.stages] == ["success"] * 6
-    assert Path(completed.executable_path or "").is_file()
+    assert build_manager.workspace.resolve(
+        Path(completed.executable_path or "")
+    ).is_file()
     commands = command_log.read_text(encoding="utf-8")
     assert "-DJSB_BUILD_EDITOR=OFF" in commands
     assert "-DBUILD_DOCS=OFF" in commands
     assert "--target jsb-sim-runner" in commands
 
+    await build_manager.execute(build.id)
+    assert command_log.read_text(encoding="utf-8") == commands
+
     cached, reused = build_manager.request(registered.id, second)
     assert reused is True
     assert cached.id == completed.id
+
+    build_manager.workspace.resolve(Path(cached.executable_path or "")).unlink()
+    replacement, reused = build_manager.request(registered.id, second)
+    assert reused is False
+    assert replacement.id != cached.id
+    await build_manager.execute(replacement.id)
+    completed = builds.get(replacement.id)
+    assert completed.status is BuildStatus.COMPLETED
 
     monkeypatch.setenv("FAKE_CMAKE_FAIL", "1")
     failed, reused = build_manager.request(registered.id, second, rebuild=True)

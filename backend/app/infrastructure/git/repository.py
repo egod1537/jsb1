@@ -2,15 +2,48 @@ from __future__ import annotations
 
 import os
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
+from app.domain.errors import ExternalProcessError
 
-class GitOperationError(RuntimeError):
+
+class GitOperationError(ExternalProcessError):
     pass
 
 
 class GitRepositoryAdapter:
     """The only JSB1 component that formats and launches Git commands."""
+
+    @staticmethod
+    def ensure_directory(path: Path) -> None:
+        path.mkdir(parents=True, exist_ok=True)
+
+    def clone(
+        self,
+        remote_url: str,
+        destination: Path,
+        *,
+        operation: str = "clone",
+        timeout: float = 300,
+        runner: Callable[..., str] | None = None,
+    ) -> str:
+        self.ensure_directory(destination.parent)
+        execute = runner or self.run
+        return execute(
+            [
+                "git",
+                "clone",
+                "--origin",
+                "origin",
+                "--",
+                remote_url,
+                str(destination),
+            ],
+            operation=operation,
+            cwd=destination.parent,
+            timeout=timeout,
+        )
 
     def git(
         self,

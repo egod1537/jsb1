@@ -6,6 +6,10 @@ afterEach(() => vi.restoreAllMocks());
 
 describe("intra-Run variant telemetry", () => {
   it("deduplicates identical commands while keeping variant responses separate", async () => {
+    vi.spyOn(api, "availableSignals").mockResolvedValue({ signals: [
+      { name: "commanded_roll", display_name: "Commanded Roll", unit: "deg" },
+      { name: "roll", display_name: "Roll", unit: "deg" },
+    ] });
     vi.spyOn(api, "signals").mockImplementation(async (_id, _signals, _points, variant) => ({
       time: [0, 1, 2],
       series: {

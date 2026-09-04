@@ -1,28 +1,37 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-from datetime import datetime, timezone
 from pathlib import Path
 
-from app.domain.models import RunStatus
-from app.repositories.runs import RunRepository
+from app.domain.clock import utc_now
+from app.domain.errors import RunAnalysisError, RuntimeReportedFailure
+from app.domain.models import Run
+from app.infrastructure.filesystem import RunArtifactStore
 from app.repositories.instances import InstanceRepository
+from app.repositories.runs import RunRepository
+from app.services.artifact_ingestion import (
+    RunArtifactIngestionService,
+    RuntimeManifestOutcome,
+)
 from app.services.build_manager import BuildManager
-from app.services.runner import SimulationRunner
-from app.services.telemetry_processing import RunTelemetryProcessor
 from app.services.execution_pipeline import RUN_PIPELINE, ExecutionPipelineRecorder
-
+from app.services.execution_plan import RunExecutionPlan, RunExecutionPlanner
+from app.services.ports import SimulationRunner
+from app.services.repository_manager import RepositoryManager
+from app.services.runtime_contract import RuntimeContractReader
+from app.services.telemetry_processing import RunTelemetryProcessor
 
 logger = logging.getLogger(__name__)
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return utc_now()
 
 
 class RunExecutionService:
+    """Claim and execute a Run using only its frozen provenance."""
+
     def __init__(
         self,
         repository: RunRepository,
@@ -31,109 +40,182 @@ class RunExecutionService:
         data_dir: Path,
         builds: BuildManager | None = None,
         instances: InstanceRepository | None = None,
+        repositories: RepositoryManager | None = None,
+        contract_reader: RuntimeContractReader | None = None,
+        artifact_store: RunArtifactStore | None = None,
+        planner: RunExecutionPlanner | None = None,
+        ingestion: RunArtifactIngestionService | None = None,
     ) -> None:
         self.repository = repository
         self.runner = runner
         self.telemetry = telemetry
         self.data_dir = data_dir.resolve()
+        self.artifact_store = artifact_store or RunArtifactStore(self.data_dir)
         self.builds = builds
         self.instances = instances
+        self.repositories = repositories
+        self.contract_reader = contract_reader or RuntimeContractReader()
+        self.planner = planner or RunExecutionPlanner(
+            self.artifact_store,
+            builds,
+            repositories,
+            self.contract_reader,
+        )
+        self.ingestion = ingestion or RunArtifactIngestionService(
+            repository, self.artifact_store
+        )
 
     async def execute(self, run_id: int) -> None:
-        run = self.repository.get(run_id)
+        run = self.repository.claim_for_execution(run_id, started_at=now_iso())
+        if run is None:
+            logger.info("run claim skipped id=%s", run_id)
+            return
+
         pipeline = ExecutionPipelineRecorder(self.repository, run_id, RUN_PIPELINE)
         pipeline.initialize()
+        instance = self.instances.get_for_run(run_id) if self.instances else None
+        result = None
+        plan: RunExecutionPlan | None = None
         try:
-            if run.output_directory is None:
-                raise RuntimeError("run output directory was not initialized")
-            output_directory = (self.data_dir / run.output_directory).resolve()
-            output_directory.mkdir(parents=True, exist_ok=True)
-            log_path = output_directory / "stdout.log"
-            logger.info("run started id=%s scenario=%s", run.id, run.scenario_name)
-            self.repository.transition(
-                run_id,
-                expected=[RunStatus.QUEUED],
-                status=RunStatus.RUNNING,
-                started_at=now_iso(),
+            plan = await asyncio.to_thread(self.planner.create, run)
+            logger.info(
+                "run started id=%s commit=%s scenario=%s",
+                run.id,
+                plan.commit_sha,
+                run.scenario_name,
             )
             pipeline.running("launch_runner")
-            executable_path: Path | None = None
-            instance = self.instances.get_for_run(run_id) if self.instances else None
-            if run.build_id is not None:
-                if self.builds is None:
-                    raise RuntimeError("build repository is not configured")
-                _, executable_path = self.builds.require_runnable(run.build_id)
 
             def on_started(pid: int) -> None:
                 if instance is not None and self.instances is not None:
                     self.instances.mark_running(instance.id, pid)
 
             result = await self.runner.run(
-                scenario_path=Path(run.scenario_path),
-                output_directory=output_directory,
-                log_path=log_path,
-                executable_path=executable_path,
-                parameters_path=(
-                    output_directory / "parameters.yaml"
-                    if run.controller_parameter_overrides
-                    else None
-                ),
+                argv=plan.argv,
+                stdout_path=plan.stdout_log,
+                stderr_path=plan.stderr_log,
+                executable_path=plan.executable,
+                cwd=plan.cwd,
                 on_started=on_started,
             )
-            if log_path.exists():
-                self._register(run_id, "stdout", log_path)
-            if result.exit_code != 0:
-                raise RuntimeError(f"runner exited with code {result.exit_code}")
+            self._register_diagnostic_logs(run_id, plan)
+            manifest_path = self.artifact_store.path(
+                plan.output_directory,
+                plan.artifact_manifest.path_for("run_metadata"),
+            )
+            if result.exit_code != 0 and not self.artifact_store.is_file(manifest_path):
+                raise RuntimeReportedFailure(
+                    f"runner exited with code {result.exit_code}"
+                )
             pipeline.success("launch_runner")
 
-            runtime_manifest = output_directory / "run.json"
-            self._ingest_runtime_manifest(run_id, runtime_manifest)
-            self._register(run_id, "run", runtime_manifest)
-            run = self.repository.get(run_id)
-
             pipeline.running("record_telemetry")
-            telemetry_path = output_directory / "telemetry.mcap"
-            if not telemetry_path.is_file():
-                raise FileNotFoundError("runner completed without telemetry.mcap")
-            self._register(run_id, "telemetry", telemetry_path)
+            outcome = self.ingestion.ingest(
+                run, plan, process_exit_code=result.exit_code
+            )
+            if not outcome.succeeded:
+                raise RuntimeReportedFailure(
+                    outcome.error or f"Runtime reported {outcome.status}"
+                )
+            if result.exit_code != 0:
+                raise RuntimeReportedFailure(
+                    f"runner exited with code {result.exit_code}"
+                )
+            if outcome.telemetry_path is None:
+                raise RuntimeError("completed Runtime did not publish telemetry")
             pipeline.success("record_telemetry")
 
-            pipeline.running("collect_artifacts")
-            logger.info("analysis started run_id=%s", run_id)
-            metrics_path = output_directory / "metrics.json"
-            processed = self.telemetry.process(
-                telemetry_path, metrics_path, variants=run.variants
-            )
-            self.repository.replace_metrics(run_id, processed.metrics)
-            self.telemetry.write_metrics(metrics_path, processed.metrics_payload)
-            self._register(run_id, "metrics", metrics_path)
-            pipeline.success("collect_artifacts")
-            pipeline.running("complete")
-            self.repository.transition(
+            self._analyze_and_complete(
                 run_id,
-                expected=[RunStatus.RUNNING],
-                status=RunStatus.COMPLETED,
-                finished_at=now_iso(),
-                exit_code=result.exit_code,
-                wall_time_sec=result.wall_time_sec,
-                simulation_time_sec=processed.simulation_time_sec,
-                error_message=None,
+                run,
+                plan,
+                outcome,
+                result.exit_code,
+                result.wall_time_sec,
+                instance.id if instance is not None else None,
+                pipeline,
             )
-            pipeline.success("complete")
-            self._write_provenance(run_id)
-            if instance is not None and self.instances is not None:
-                self.instances.finish(instance.id, failed=False)
-            logger.info("analysis completed run_id=%s", run_id)
         except asyncio.CancelledError:
             pipeline.fail_current("execution worker stopped while run was active")
-            await self._fail(run_id, "execution worker stopped while run was active")
+            await self._fail(
+                run_id,
+                "execution worker stopped while run was active",
+                exit_code=getattr(result, "exit_code", None),
+                wall_time=getattr(result, "wall_time_sec", None),
+            )
             raise
         except Exception as exc:
             logger.exception("run failed id=%s", run_id)
             pipeline.fail_current(str(exc))
-            exit_code = getattr(locals().get("result"), "exit_code", None)
-            wall_time = getattr(locals().get("result"), "wall_time_sec", None)
-            await self._fail(run_id, str(exc), exit_code=exit_code, wall_time=wall_time)
+            await self._fail(
+                run_id,
+                str(exc),
+                exit_code=getattr(result, "exit_code", None),
+                wall_time=getattr(result, "wall_time_sec", None),
+            )
+        finally:
+            if plan is not None:
+                self._register_diagnostic_logs(run_id, plan)
+
+    def _analyze_and_complete(
+        self,
+        run_id: int,
+        run: Run,
+        plan: RunExecutionPlan,
+        outcome: RuntimeManifestOutcome,
+        exit_code: int,
+        wall_time_sec: float,
+        instance_id: int | None,
+        pipeline: ExecutionPipelineRecorder,
+    ) -> None:
+        assert outcome.telemetry_path is not None
+        simulation_time = outcome.simulation_time_sec
+        analysis_error: str | None = None
+        pipeline.running("collect_artifacts")
+        try:
+            metrics_path = self.artifact_store.path(
+                plan.output_directory, "metrics.json"
+            )
+            processed = self.telemetry.process(
+                outcome.telemetry_path,
+                metrics_path,
+                variants=list(plan.variants),
+                signal_catalog=plan.signal_catalog,
+                descriptor=plan.telemetry_descriptor,
+            )
+            simulation_time = processed.simulation_time_sec
+            self.repository.replace_metrics(run_id, processed.metrics)
+            self.artifact_store.write_json(metrics_path, processed.metrics_payload)
+            self._register(run_id, "metrics", metrics_path)
+            pipeline.success("collect_artifacts")
+            logger.info("analysis completed run_id=%s", run_id)
+        except Exception as exc:
+            detail = str(exc).strip() or exc.__class__.__name__
+            failure = RunAnalysisError(detail)
+            analysis_error = f"analysis failed: {failure}"
+            logger.exception(
+                "analysis failed for completed simulation run_id=%s", run_id
+            )
+            pipeline.recoverable_failure("collect_artifacts", analysis_error)
+
+        pipeline.running("complete")
+        self.repository.complete_run(
+            run_id,
+            finished_at=now_iso(),
+            exit_code=exit_code,
+            wall_time_sec=wall_time_sec,
+            simulation_time_sec=simulation_time,
+            error_message=analysis_error,
+        )
+        pipeline.success(
+            "complete",
+            "Simulation completed; analysis unavailable"
+            if analysis_error
+            else "Simulation and analysis completed",
+        )
+        self._write_provenance(run_id, plan.output_directory)
+        if instance_id is not None and self.instances is not None:
+            self.instances.finish(instance_id, failed=False)
 
     async def _fail(
         self,
@@ -144,12 +226,8 @@ class RunExecutionService:
         wall_time: float | None = None,
     ) -> None:
         try:
-            run = self.repository.get(run_id)
-            expected = [RunStatus.QUEUED, RunStatus.RUNNING]
-            self.repository.transition(
+            self.repository.fail_run(
                 run_id,
-                expected=expected,
-                status=RunStatus.FAILED,
                 finished_at=now_iso(),
                 exit_code=exit_code,
                 wall_time_sec=wall_time,
@@ -162,99 +240,37 @@ class RunExecutionService:
         except Exception:
             logger.exception("could not persist failed status run_id=%s", run_id)
             return
+        run = self.repository.get(run_id)
         if run.output_directory:
             try:
-                output = (self.data_dir / run.output_directory).resolve()
-                output.mkdir(parents=True, exist_ok=True)
-                log_path = output / "stdout.log"
-                if log_path.exists():
-                    self._register(run_id, "stdout", log_path)
-                runtime_manifest = output / "run.json"
-                if runtime_manifest.is_file():
-                    self._register(run_id, "run", runtime_manifest)
-                self._write_provenance(run_id)
+                output = self.artifact_store.prepare_output(run.output_directory)
+                self._write_provenance(run_id, output)
             except Exception:
-                logger.exception("could not finalize failed run artifacts run_id=%s", run_id)
+                logger.exception(
+                    "could not finalize failed run artifacts run_id=%s", run_id
+                )
+
+    def _register_diagnostic_logs(self, run_id: int, plan: RunExecutionPlan) -> None:
+        for kind, path in (
+            ("stdout", plan.stdout_log),
+            ("stderr", plan.stderr_log),
+        ):
+            if self.artifact_store.is_file(path):
+                self._register(run_id, kind, path)
 
     def _register(self, run_id: int, kind: str, path: Path) -> None:
-        relative = path.resolve().relative_to(self.data_dir).as_posix()
-        self.repository.upsert_artifact(run_id, kind, relative)
+        self.repository.record_artifact(
+            run_id, self.artifact_store.metadata(kind, path)
+        )
 
-    def _write_provenance(self, run_id: int) -> None:
+    def _write_provenance(self, run_id: int, output_directory: Path) -> None:
         run = self.repository.get(run_id)
-        if not run.output_directory:
-            return
-        path = self.data_dir / run.output_directory / "jsb1-run.json"
+        path = self.artifact_store.path(output_directory, "jsb1-run.json")
         payload = run.model_dump(mode="json")
         payload["repository"] = (
             {"id": run.repository_id, "name": run.repository_name}
             if run.repository_id is not None
             else None
         )
-        path.write_text(
-            json.dumps(payload, indent=2, allow_nan=False), encoding="utf-8"
-        )
+        self.artifact_store.write_json(path, payload)
         self._register(run_id, "provenance", path)
-
-    def _ingest_runtime_manifest(self, run_id: int, path: Path) -> None:
-        if not path.is_file():
-            raise FileNotFoundError("runner completed without run.json")
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            raise ValueError("runner produced an invalid run.json") from exc
-        if not isinstance(payload, dict):
-            raise ValueError("runner run.json must be an object")
-        execution = payload.get("execution")
-        execution = execution if isinstance(execution, dict) else {}
-        raw_variants = execution.get("variants", payload.get("variants"))
-        variants = [
-            item for item in raw_variants or []
-            if isinstance(item, str) and item.strip()
-        ] if isinstance(raw_variants, list) else []
-        mode = payload.get("mode", execution.get("mode", "single"))
-        if not isinstance(mode, str):
-            mode = "single"
-        mode = mode.strip().lower().replace("_", "-")
-        if mode in {"compare-only", "comparison"}:
-            mode = "compare"
-        raw_results = payload.get("results", {})
-        results = {
-            variant: value
-            for variant, value in raw_results.items()
-            if isinstance(variant, str) and isinstance(value, dict)
-        } if isinstance(raw_results, dict) else {}
-        if not variants:
-            variants = list(results)
-        if not variants:
-            legacy = payload.get("execution_variant", payload.get("autopilot"))
-            if isinstance(legacy, str) and legacy:
-                variants = [legacy]
-                results = {legacy: {"status": payload.get("status", "completed")}}
-        if not variants:
-            raise ValueError("runner run.json does not declare execution variants")
-        run = self.repository.get(run_id)
-        if run.execution_mode == "compare" and (
-            mode != "compare" or set(variants) != set(run.variants)
-        ):
-            raise ValueError(
-                "runner run.json does not match compare-only execution capabilities"
-            )
-        parameters = dict(run.variant_parameters)
-        for variant, result_payload in results.items():
-            raw_parameters = result_payload.get("parameters")
-            if isinstance(raw_parameters, dict):
-                parameters[variant] = {
-                    key: float(value)
-                    for key, value in raw_parameters.items()
-                    if isinstance(key, str)
-                    and isinstance(value, (int, float))
-                    and not isinstance(value, bool)
-                }
-        self.repository.set_variant_metadata(
-            run_id,
-            execution_mode=mode,
-            variants=variants,
-            results=results,
-            parameters=parameters,
-        )

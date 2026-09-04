@@ -3,7 +3,7 @@ import { IconNames } from "@blueprintjs/icons";
 import { ErrorPanel, Loading } from "../../components/Loading";
 import { StatusTag } from "../../components/StatusTag";
 import type { Build } from "../../types/api";
-import { BUILD_PIPELINE_GROUPS, ExecutionPipeline } from "../pipeline/ExecutionPipeline";
+import { BUILD_PIPELINE_GROUPS, ExecutionPipeline } from "../pipeline";
 
 interface Props {
   build: Build | null;

@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from typing import Annotated
-
 import asyncio
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -11,8 +10,15 @@ from app.api.dependencies import (
     get_repository_manager,
     get_runtime_variants,
 )
-from app.domain.models import RuntimeControllerParametersResponse, RuntimeVariantsResponse
+from app.domain.models import (
+    RuntimeControllerParametersResponse,
+    RuntimeVariantsResponse,
+)
 from app.domain.repository import Branch, RuntimeRepositoryStatus
+from app.services.controller_parameters import (
+    ControllerParameterError,
+    RuntimeControllerParameterService,
+)
 from app.services.repository_manager import (
     GitOperationError,
     InvalidRepositoryPath,
@@ -20,13 +26,11 @@ from app.services.repository_manager import (
     RuntimeRepositoryNotConfigured,
     RuntimeRepositoryUnavailable,
 )
-from app.services.runtime_variants import RuntimeVariantContractError, RuntimeVariantService
-from app.services.controller_parameters import (
-    ControllerParameterError,
-    RuntimeControllerParameterService,
-)
 from app.services.runtime_contract import RuntimeContractError
-
+from app.services.runtime_variants import (
+    RuntimeVariantContractError,
+    RuntimeVariantService,
+)
 
 router = APIRouter(prefix="/runtime", tags=["runtime"])
 
@@ -50,17 +54,29 @@ async def runtime_parameters(
         RuntimeControllerParameterService, Depends(get_controller_parameters)
     ],
     branch: Annotated[str | None, Query(min_length=1, max_length=255)] = None,
+    commit_sha: Annotated[
+        str | None, Query(pattern="^[0-9a-fA-F]{40}$")
+    ] = None,
 ) -> RuntimeControllerParametersResponse:
     try:
         runtime = await asyncio.to_thread(manager.runtime_repository)
         selected_branch = branch or runtime.default_branch
         await asyncio.to_thread(manager.fetch, runtime.id)
         revision = await asyncio.to_thread(
-            manager.resolve_branch, runtime.id, selected_branch
+            manager.revision if commit_sha else manager.resolve_branch,
+            runtime.id,
+            commit_sha or selected_branch,
         )
         worktree = await asyncio.to_thread(
             manager.prepare_worktree, runtime.id, revision.commit_sha
         )
+        if service.reader.is_indexed(worktree):
+            await asyncio.to_thread(
+                service.reader.load_bundle,
+                worktree,
+                repository_id=runtime.id,
+                commit_sha=revision.commit_sha,
+            )
         catalog = await asyncio.to_thread(service.catalog, worktree)
     except (RuntimeRepositoryNotConfigured, RuntimeRepositoryUnavailable) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -119,7 +135,16 @@ async def runtime_variants(
         worktree = await asyncio.to_thread(
             manager.prepare_worktree, runtime.id, revision.commit_sha
         )
-        capability = await asyncio.to_thread(variants.capabilities, worktree)
+        if variants.reader.is_indexed(worktree):
+            bundle = await asyncio.to_thread(
+                variants.reader.load_bundle,
+                worktree,
+                repository_id=runtime.id,
+                commit_sha=revision.commit_sha,
+            )
+            capability = bundle.capabilities
+        else:
+            capability = await asyncio.to_thread(variants.capabilities, worktree)
     except (RuntimeRepositoryNotConfigured, RuntimeRepositoryUnavailable) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except (KeyError, GitOperationError, InvalidRepositoryPath) as exc:

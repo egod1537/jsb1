@@ -5,11 +5,24 @@ from typing import Any, Literal
 
 import numpy as np
 import yaml
+from jsb1_analysis.metrics.frequency import dominant_frequency
+from jsb1_analysis.metrics.primitives import (
+    absolute_overshoot,
+    peak_absolute,
+    peak_to_peak,
+    rms_error,
+    saturation_metric,
+    steady_state_error,
+)
+from jsb1_analysis.metrics.primitives import (
+    settling_time as shared_settling_time,
+)
+from jsb1_analysis.telemetry import TelemetryDataset
 from numpy.typing import ArrayLike, NDArray
 from pydantic import BaseModel, Field
 
 from app.analysis.mcap_reader import McapRunReader
-
+from app.domain.telemetry import RuntimeSignalCatalog
 
 RAD_TO_DEG = 180.0 / np.pi
 DEFAULT_SETTLING_BAND_DEG = 0.1
@@ -156,6 +169,9 @@ def _metric_units() -> dict[str, str]:
 class RollHoldAnalyzer:
     """Deterministic step-response analysis for one frozen roll_hold scenario."""
 
+    scenario_type = "roll_hold"
+    required_signals = frozenset({"commanded_roll", "roll"})
+
     def __init__(self, reader: McapRunReader) -> None:
         self.reader = reader
 
@@ -165,18 +181,44 @@ class RollHoldAnalyzer:
         telemetry_path: Path,
         *,
         variant: str | None = None,
+        signal_catalog: RuntimeSignalCatalog | None = None,
+        descriptor: bytes | None = None,
     ) -> RollHoldAnalysisResult:
         definition = yaml.safe_load(scenario_path.read_text(encoding="utf-8"))
         if not isinstance(definition, dict):
-            raise ValueError("scenario snapshot root must be an object")
-        available = set(self.reader.channels(telemetry_path, variant=variant))
+            # This is malformed document content, not a caller argument type.
+            raise ValueError("scenario snapshot root must be an object")  # noqa: TRY004
+        dataset = self.reader.dataset(
+            telemetry_path,
+            signal_catalog=signal_catalog,
+            descriptor=descriptor,
+        )
+        return self.analyze_dataset(
+            dataset,
+            variant=variant,
+            scenario_definition=definition,
+        )
+
+    def analyze_dataset(
+        self,
+        dataset: TelemetryDataset,
+        *,
+        variant: str | None = None,
+        scenario_definition: object,
+        **_context: object,
+    ) -> RollHoldAnalysisResult:
+        if not isinstance(scenario_definition, dict):
+            # Malformed snapshot content, not a caller argument type.
+            raise ValueError("scenario snapshot root must be an object")  # noqa: TRY004
+        available = set(dataset.available_signals(variant))
         requested = [name for name in ROLL_HOLD_SIGNALS if name in available]
         if not requested:
-            return self.analyze_series(definition, [], {})
-        time, series = self.reader.read_aligned(
-            telemetry_path, requested, variant=variant
+            return self.analyze_series(scenario_definition, [], {})
+        time, series = dataset.align(
+            requested,
+            variant=variant,
         )
-        return self.analyze_series(definition, time, series)
+        return self.analyze_series(scenario_definition, time, series)
 
     def analyze_series(
         self,
@@ -256,7 +298,8 @@ class RollHoldAnalyzer:
 
             settling_at: float | None = None
             if roll is not None and response_time.size and target_deg is not None:
-                roll_deg = roll[onset:] * RAD_TO_DEG
+                response_roll = roll[onset:]
+                roll_deg = response_roll * RAD_TO_DEG
                 error_deg = reference_deg - roll_deg
                 rise_time, rise_low_at, rise_high_at = self._rise_time_details(
                     response_time, roll_deg, initial_roll, target_deg
@@ -275,30 +318,43 @@ class RollHoldAnalyzer:
                         value=initial_roll + rise_delta * RISE_HIGH_FRACTION,
                         label="Rise 90%",
                     )
-                settling_time, settling_at = self._settling_time(
-                    response_time, error_deg, settling_band
+                settling_time = shared_settling_time(
+                    response_time,
+                    error_deg / RAD_TO_DEG,
+                    band=settling_band / RAD_TO_DEG,
+                )
+                settling_at = (
+                    response_start + settling_time
+                    if settling_time is not None
+                    else None
                 )
                 metrics["settling_time_s"] = settling_time
                 direction = 1.0 if target_deg - initial_roll >= 0 else -1.0
-                metrics["overshoot_deg"] = max(
-                    0.0, float(np.max(direction * (roll_deg - target_deg)))
-                )
+                reference_rad = reference_deg / RAD_TO_DEG
+                metrics["overshoot_deg"] = absolute_overshoot(
+                    reference_rad,
+                    response_roll,
+                    direction=direction,
+                ) * RAD_TO_DEG
                 peak_roll_index = int(np.argmax(direction * roll_deg))
                 markers["peak_roll"] = RollHoldMarker(
                     time_sec=float(response_time[peak_roll_index]),
                     value=float(roll_deg[peak_roll_index]),
                     label="Peak roll",
                 )
-                metrics["rms_tracking_error_deg"] = float(
-                    np.sqrt(np.mean(np.square(error_deg)))
+                metrics["rms_tracking_error_deg"] = (
+                    rms_error(reference_rad, response_roll) * RAD_TO_DEG
                 )
                 steady_count = max(
                     1, int(np.ceil(len(error_deg) * DEFAULT_STEADY_STATE_FRACTION))
                 )
-                steady_error = error_deg[-steady_count:]
                 steady_roll = roll_deg[-steady_count:]
                 steady_time = response_time[-steady_count:]
-                metrics["steady_state_error_deg"] = float(abs(np.mean(steady_error)))
+                metrics["steady_state_error_deg"] = steady_state_error(
+                    reference_rad,
+                    response_roll,
+                    fraction=DEFAULT_STEADY_STATE_FRACTION,
+                ) * RAD_TO_DEG
                 regions["steady_state_error"] = AnalysisRegion(
                     start_sec=float(steady_time[0]), end_sec=float(steady_time[-1])
                 )
@@ -337,10 +393,9 @@ class RollHoldAnalyzer:
                     )
                     residual_min_index = int(np.argmin(residual_roll))
                     residual_max_index = int(np.argmax(residual_roll))
-                    metrics["residual_oscillation_pp_deg"] = float(
-                        residual_roll[residual_max_index]
-                        - residual_roll[residual_min_index]
-                    )
+                    metrics["residual_oscillation_pp_deg"] = peak_to_peak(
+                        response_roll[steady_index:]
+                    ) * RAD_TO_DEG
                     markers["residual_min"] = RollHoldMarker(
                         time_sec=float(residual_time[residual_min_index]),
                         value=float(residual_roll[residual_min_index]),
@@ -356,7 +411,9 @@ class RollHoldAnalyzer:
             if roll_rate is not None and response_time.size:
                 response_roll_rate = roll_rate[onset:] * RAD_TO_DEG
                 peak_rate_index = int(np.argmax(np.abs(response_roll_rate)))
-                metrics["peak_roll_rate_deg_s"] = float(abs(response_roll_rate[peak_rate_index]))
+                metrics["peak_roll_rate_deg_s"] = peak_absolute(
+                    roll_rate[onset:]
+                ) * RAD_TO_DEG
                 markers["peak_roll_rate"] = RollHoldMarker(
                     time_sec=float(response_time[peak_rate_index]),
                     value=float(response_roll_rate[peak_rate_index]),
@@ -366,9 +423,9 @@ class RollHoldAnalyzer:
             if aileron is not None and response_time.size:
                 response_aileron = aileron[onset:]
                 peak_aileron_index = int(np.argmax(np.abs(response_aileron)))
-                metrics["peak_aileron"] = float(abs(response_aileron[peak_aileron_index]))
-                metrics["rms_aileron"] = float(
-                    np.sqrt(np.mean(np.square(response_aileron)))
+                metrics["peak_aileron"] = peak_absolute(response_aileron)
+                metrics["rms_aileron"] = rms_error(
+                    np.zeros_like(response_aileron), response_aileron
                 )
                 markers["peak_aileron"] = RollHoldMarker(
                     time_sec=float(response_time[peak_aileron_index]),
@@ -382,13 +439,13 @@ class RollHoldAnalyzer:
                 )
                 if aileron_limit is not None:
                     saturated = np.abs(response_aileron) >= aileron_limit
-                    saturation_time = self._active_duration(response_time, saturated)
-                    response_duration = float(response_time[-1] - response_time[0])
-                    metrics["aileron_saturation_time_s"] = saturation_time
-                    metrics["aileron_saturation_fraction"] = (
-                        saturation_time / response_duration
-                        if response_duration > 0 else 0.0
+                    saturation = saturation_metric(
+                        response_time,
+                        response_aileron,
+                        limit=aileron_limit,
                     )
+                    metrics["aileron_saturation_time_s"] = saturation.duration
+                    metrics["aileron_saturation_fraction"] = saturation.ratio
                     intervals["aileron_saturation"] = self._active_intervals(
                         response_time, saturated
                     )
@@ -480,17 +537,6 @@ class RollHoldAnalyzer:
         return np.full(max(0, sample_count - onset), target or 0.0, dtype=np.float64)
 
     @staticmethod
-    def _rise_time(
-        time: NDArray[np.float64],
-        roll_deg: NDArray[np.float64],
-        initial_deg: float,
-        target_deg: float,
-    ) -> float | None:
-        return RollHoldAnalyzer._rise_time_details(
-            time, roll_deg, initial_deg, target_deg
-        )[0]
-
-    @staticmethod
     def _rise_time_details(
         time: NDArray[np.float64],
         roll_deg: NDArray[np.float64],
@@ -512,22 +558,6 @@ class RollHoldAnalyzer:
         return high_at - low_at if high_at is not None else None, low_at, high_at
 
     @staticmethod
-    def _settling_time(
-        time: NDArray[np.float64],
-        error_deg: NDArray[np.float64],
-        band_deg: float,
-    ) -> tuple[float | None, float | None]:
-        if time.size == 0:
-            return None, None
-        within = np.abs(error_deg) <= band_deg
-        remains_within = np.logical_and.accumulate(within[::-1])[::-1]
-        candidates = np.flatnonzero(remains_within)
-        if candidates.size == 0:
-            return None, None
-        settled_at = float(time[candidates[0]])
-        return settled_at - float(time[0]), settled_at
-
-    @staticmethod
     def _oscillation_metrics(
         time: NDArray[np.float64],
         deviation_deg: NDArray[np.float64],
@@ -545,23 +575,9 @@ class RollHoldAnalyzer:
         duration = float(time[-1] - time[0])
         if duration <= 0:
             return cycles, None
-        spacing = duration / (len(time) - 1)
         uniform_time = np.linspace(float(time[0]), float(time[-1]), len(time))
         uniform = np.interp(uniform_time, time, deviation_deg)
-        spectrum = np.abs(np.fft.rfft(uniform - np.mean(uniform)))
-        frequencies = np.fft.rfftfreq(len(uniform), d=spacing)
-        if len(frequencies) <= 1:
-            return cycles, None
-        index = int(np.argmax(spectrum[1:]) + 1)
-        return cycles, float(frequencies[index]) if spectrum[index] > 0 else None
-
-    @staticmethod
-    def _active_duration(
-        time: NDArray[np.float64], active: NDArray[np.bool_]
-    ) -> float:
-        if time.size < 2:
-            return 0.0
-        return float(np.sum(np.diff(time)[active[:-1]]))
+        return cycles, dominant_frequency(uniform_time, uniform)
 
     @staticmethod
     def _active_intervals(
