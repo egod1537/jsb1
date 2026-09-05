@@ -1,7 +1,7 @@
 import { Button } from "@blueprintjs/core";
 import { useState, type CSSProperties, type DragEvent } from "react";
 import type { SignalMetadata } from "../../types/api";
-import { PLOT_LAYOUTS, type PlotDataSource, type PlotInstance, type PlotLayoutId, type TimelineState, type WorkspaceTelemetry } from "./plotTypes";
+import { PLOT_LAYOUTS, type HorizontalReferenceLine, type PlotDataSource, type PlotInstance, type PlotLayoutId, type TimelineState, type WorkspaceTelemetry } from "./plotTypes";
 import { PlotPanel } from "./PlotPanel";
 
 interface Props {
@@ -19,6 +19,8 @@ interface Props {
   onMovePlot: (id: string, targetSlot: number) => void;
   resolveSignal?: PlotDataSource["resolveSignal"];
   hasSignal?: PlotDataSource["hasSignal"];
+  acceptanceBandDeg?: number;
+  horizontalReferenceLinesByPlot?: Record<string, HorizontalReferenceLine[]>;
 }
 
 export function PlotGrid(props: Props) {
@@ -94,6 +96,8 @@ export function PlotGrid(props: Props) {
           onClose={() => props.onClose(plot.id)}
           resolveSignal={props.resolveSignal}
           hasSignal={props.hasSignal}
+          acceptanceBandDeg={props.acceptanceBandDeg}
+          horizontalReferenceLines={props.horizontalReferenceLinesByPlot?.[plot.sourcePlotId ?? plot.id]}
         />}
       </div>;
     })}

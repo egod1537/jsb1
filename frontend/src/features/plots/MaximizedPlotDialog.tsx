@@ -1,7 +1,7 @@
 import { Dialog, DialogBody } from "@blueprintjs/core";
 import { IconNames } from "@blueprintjs/icons";
 import type { SignalMetadata } from "../../types/api";
-import type { PlotDataSource, PlotInstance, TimelineState, WorkspaceTelemetry } from "./plotTypes";
+import type { HorizontalReferenceLine, PlotDataSource, PlotInstance, TimelineState, WorkspaceTelemetry } from "./plotTypes";
 import { PlotPanel } from "./PlotPanel";
 
 interface Props {
@@ -14,6 +14,8 @@ interface Props {
   onClose: () => void;
   resolveSignal?: PlotDataSource["resolveSignal"];
   hasSignal?: PlotDataSource["hasSignal"];
+  acceptanceBandDeg?: number;
+  horizontalReferenceLines?: HorizontalReferenceLine[];
 }
 
 export function MaximizedPlotDialog({
@@ -26,6 +28,8 @@ export function MaximizedPlotDialog({
   onClose,
   resolveSignal,
   hasSignal,
+  acceptanceBandDeg,
+  horizontalReferenceLines,
 }: Props) {
   return <Dialog
     className="plot-maximize-dialog"
@@ -45,6 +49,8 @@ export function MaximizedPlotDialog({
         onCursorTimeChange={onCursorTimeChange}
         resolveSignal={resolveSignal}
         hasSignal={hasSignal}
+        acceptanceBandDeg={acceptanceBandDeg}
+        horizontalReferenceLines={horizontalReferenceLines}
       />
     </DialogBody>}
   </Dialog>;

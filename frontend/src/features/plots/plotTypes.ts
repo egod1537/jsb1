@@ -22,6 +22,14 @@ export interface PlotDefinition {
   id: string;
   title: string;
   signals: SignalReference[];
+  angularAware?: boolean;
+  acceptanceBandSignal?: string;
+}
+
+export interface HorizontalReferenceLine {
+  value: number;
+  label: string;
+  emphasized?: boolean;
 }
 
 export interface PlotPreset {

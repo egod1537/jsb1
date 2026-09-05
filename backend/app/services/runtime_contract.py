@@ -67,6 +67,42 @@ class HeadlessExecutionCapabilities:
     modes: tuple[str, ...] = ()
     parameter_overrides: dict[str, Any] | None = None
     embedded_telemetry_descriptor: bool = False
+    scenario_types: dict[str, dict[str, Any]] | None = None
+
+    def for_scenario(self, scenario_type: str) -> HeadlessExecutionCapabilities:
+        raw = (self.scenario_types or {}).get(scenario_type)
+        if raw is None:
+            if self.authoritative and self.scenario_types is not None:
+                raise RuntimeCapabilityMismatch(
+                    f"Runtime does not support scenario_type {scenario_type!r}"
+                )
+            return self
+        if not isinstance(raw, dict):
+            raise RuntimeCapabilityMismatch(
+                f"Invalid execution capability for scenario_type {scenario_type!r}"
+            )
+        mode = str(raw.get("mode", "")).strip()
+        variants = tuple(
+            item for item in raw.get("variants", ()) if isinstance(item, str)
+        )
+        if (
+            not mode
+            or not variants
+            or (self.modes and mode not in self.modes)
+            or any(variant not in self.variants for variant in variants)
+        ):
+            raise RuntimeCapabilityMismatch(
+                f"Invalid execution capability for scenario_type {scenario_type!r}"
+            )
+        return HeadlessExecutionCapabilities(
+            mode=mode,
+            variants=variants,
+            authoritative=self.authoritative,
+            modes=self.modes,
+            parameter_overrides=self.parameter_overrides,
+            embedded_telemetry_descriptor=self.embedded_telemetry_descriptor,
+            scenario_types=self.scenario_types,
+        )
 
 
 @dataclass(frozen=True)
@@ -451,9 +487,9 @@ class RuntimeContractReader:
                     "JSB0 signals reference undeclared topics: "
                     + ", ".join(missing_topics)
                 )
-            api_ids = [item.api_id for item in definitions]
-            if len(api_ids) != len(set(api_ids)):
-                raise InvalidRuntimeContract("JSB0 signal ids have ambiguous API names")
+            signal_ids = [item.id for item in definitions]
+            if len(signal_ids) != len(set(signal_ids)):
+                raise InvalidRuntimeContract("JSB0 signal ids must be unique")
             if any(
                 bound is not None and not math.isfinite(float(bound))
                 for item in definitions
@@ -462,12 +498,15 @@ class RuntimeContractReader:
                 raise InvalidRuntimeContract(
                     "JSB0 signal catalog contains a non-finite range"
                 )
-        return RuntimeSignalCatalog(
+        catalog = RuntimeSignalCatalog(
             contract_version=str(payload.get("contract_version", "")),
             telemetry_schema_version=int(payload.get("telemetry_schema_version", 0)),
             topics=copy.deepcopy(topics),
             signals=tuple(definitions),
         )
+        if len(catalog.by_api_id()) != len(definitions):
+            raise InvalidRuntimeContract("JSB0 signal ids have ambiguous API names")
+        return catalog
 
     def load_run_schema(self, runtime_root: Path) -> Draft202012Validator:
         return self._load_schema(runtime_root, "run_schema")
@@ -781,6 +820,8 @@ class RuntimeContractReader:
         mode = headless.get("mode", headless.get("headless_mode"))
         if mode is None and len(modes) == 1:
             mode = modes[0]
+        if mode is None and "compare_variants" in headless:
+            mode = "compare"
         execution = headless.get("execution")
         if mode is None and isinstance(execution, dict):
             mode = execution.get("mode")
@@ -803,6 +844,7 @@ class RuntimeContractReader:
             )
         overrides = headless.get("parameter_overrides")
         telemetry = headless.get("telemetry_contract")
+        scenario_types = headless.get("scenario_types")
         return HeadlessExecutionCapabilities(
             normalized_mode,
             variants,
@@ -812,6 +854,7 @@ class RuntimeContractReader:
             bool(telemetry.get("embedded_file_descriptor_set", False))
             if isinstance(telemetry, dict)
             else False,
+            copy.deepcopy(scenario_types) if isinstance(scenario_types, dict) else None,
         )
 
     @staticmethod

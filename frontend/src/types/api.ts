@@ -118,6 +118,76 @@ export interface RollHoldAnalysisVariants {
   variants: Record<string, RollHoldAnalysis>;
 }
 
+export interface CourseHoldAnalysisResult {
+  steady_state_course_error_rad: number;
+  rms_course_error_rad: number;
+  overshoot_rad: number;
+  settling_time_s: number | null;
+  oscillation_count: number;
+  max_roll_setpoint_rad: number;
+  roll_limit_duration_s: number | null;
+  roll_limit_ratio: number | null;
+  roll_setpoint_rate_limit_duration_s: number | null;
+  roll_setpoint_rate_limit_ratio: number | null;
+}
+
+export interface CourseHoldAnalysisVariants {
+  analyzer: "course_hold";
+  variants: Record<string, CourseHoldAnalysisResult>;
+}
+
+export interface PitchHoldAnalysisResult {
+  steady_state_mean_pitch_error_rad: number;
+  steady_state_max_abs_pitch_error_rad: number;
+  steady_state_rms_pitch_error_rad: number;
+  steady_state_max_abs_pitch_rate_rad_s: number;
+  steady_state_rms_pitch_rate_rad_s: number;
+  overshoot_rad: number;
+  settling_time_s: number | null;
+  oscillation_count: number;
+  pitch_peak_to_peak_rad: number;
+  max_abs_elevator: number;
+  elevator_saturation_duration_s: number | null;
+  elevator_saturation_ratio: number | null;
+  integrator_limit_duration_s: number | null;
+  integrator_limit_ratio: number | null;
+  tail_window_s: number;
+}
+
+export interface PitchHoldAnalysisVariants {
+  analyzer: "pitch_hold";
+  variants: Record<string, PitchHoldAnalysisResult>;
+}
+
+export interface TecsAnalysisResult {
+  steady_state_mean_altitude_error_m: number;
+  steady_state_max_abs_altitude_error_m: number;
+  steady_state_rms_altitude_error_m: number;
+  altitude_overshoot_m: number;
+  altitude_settling_time_s: number | null;
+  steady_state_mean_airspeed_error_mps: number;
+  steady_state_max_abs_airspeed_error_mps: number;
+  steady_state_rms_airspeed_error_mps: number;
+  minimum_airspeed_mps: number;
+  maximum_airspeed_mps: number;
+  airspeed_settling_time_s: number | null;
+  pitch_target_peak_to_peak_rad: number;
+  throttle_peak_to_peak: number;
+  throttle_saturation_duration_s: number | null;
+  throttle_saturation_ratio: number | null;
+  elevator_saturation_duration_s: number | null;
+  elevator_saturation_ratio: number | null;
+  underspeed_protection_activated: boolean | null;
+  overspeed_protection_activated: boolean | null;
+  safe_airspeed_violation_duration_s: number | null;
+  tail_window_s: number;
+}
+
+export interface TecsAnalysisVariants {
+  analyzer: "tecs";
+  variants: Record<string, TecsAnalysisResult>;
+}
+
 export interface Artifact {
   id: number;
   run_id: number;
@@ -182,6 +252,8 @@ export interface ControllerParameterDefinition {
   group?: string | null;
   symbol?: string | null;
   unit?: string | null;
+  display_unit?: string | null;
+  display_scale?: number;
   default_value: number;
   minimum?: number | null;
   maximum?: number | null;
@@ -197,6 +269,7 @@ export interface ControllerParameterDefinition {
   read_only?: boolean;
   experimental?: boolean;
   variants: string[];
+  scenario_types?: string[];
 }
 
 export interface RuntimeControllerParameters {
@@ -317,6 +390,13 @@ export interface RuntimeVariants {
   commit_sha: string;
   mode?: string;
   variants: string[];
+  scenario_types?: Record<string, {
+    mode: string;
+    variants: string[];
+    primary_supported?: boolean;
+    reason?: string;
+    lateral_stabilization?: string;
+  }>;
 }
 
 export interface RuntimeRepository {

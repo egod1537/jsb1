@@ -176,6 +176,51 @@ def run_roll_hold_analysis(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+@router.get("/runs/{run_id}/analysis/course-hold")
+def run_course_hold_analysis(
+    run_id: int,
+    service: Annotated[RunAnalysisService, Depends(get_run_analysis)],
+) -> dict[str, object]:
+    try:
+        return service.analyze_course_hold(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="run or telemetry artifact not found") from exc
+    except AnalyzerNotApplicable as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (OSError, ValueError, McapReadError, UnsafeArtifactPath) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/runs/{run_id}/analysis/pitch-hold")
+def run_pitch_hold_analysis(
+    run_id: int,
+    service: Annotated[RunAnalysisService, Depends(get_run_analysis)],
+) -> dict[str, object]:
+    try:
+        return service.analyze_pitch_hold(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="run or telemetry artifact not found") from exc
+    except AnalyzerNotApplicable as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (OSError, ValueError, McapReadError, UnsafeArtifactPath) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/runs/{run_id}/analysis/tecs")
+def run_tecs_analysis(
+    run_id: int,
+    service: Annotated[RunAnalysisService, Depends(get_run_analysis)],
+) -> dict[str, object]:
+    try:
+        return service.analyze_tecs(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="run or telemetry artifact not found") from exc
+    except AnalyzerNotApplicable as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (OSError, ValueError, McapReadError, UnsafeArtifactPath) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.get("/runs/{run_id}/signals", response_model=SignalResponse)
 def run_signals(
     run_id: int,

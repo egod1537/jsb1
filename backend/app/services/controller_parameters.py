@@ -86,6 +86,7 @@ class RuntimeControllerParameterService:
         execution_variants: list[str],
         requested: dict[str, float],
         allowed_parameter_ids: list[str] | tuple[str, ...] | None = None,
+        scenario_type: str | None = None,
     ) -> ResolvedControllerParameters:
         catalog = self.catalog(runtime_root)
         all_definitions = {item.id: item for item in catalog.parameters}
@@ -107,6 +108,11 @@ class RuntimeControllerParameterService:
             and (not item.variants or any(
                 variant in item.variants for variant in execution_variants
             ))
+            and (
+                scenario_type is None
+                or not item.scenario_types
+                or scenario_type in item.scenario_types
+            )
         }
         unknown = sorted(set(requested) - set(supported))
         if unknown:

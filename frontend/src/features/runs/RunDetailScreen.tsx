@@ -66,18 +66,34 @@ export function RunDetailScreen() {
   const [buildDetailsOpen, setBuildDetailsOpen] = useState(false);
   const [parametersOpen, setParametersOpen] = useState(false);
   const [parameterDefinitions, setParameterDefinitions] = useState<ControllerParameterDefinition[]>([]);
+  const [acceptanceBandDeg, setAcceptanceBandDeg] = useState<number | undefined>();
   const [view, setView] = useState<IntraRunView>("overlay");
   const loadScenarioSnapshot = useCallback(() => api.runScenario(id), [id]);
   const completed = detail.data?.run.status === "completed";
   const buildDetails = useBuildDetails(detail.data?.run.build_id ?? null);
   useEffect(() => {
-    if (!parametersOpen || !detail.data?.run.branch) return;
+    const needsTecsReferenceLines = completed && detail.data?.run.scenario_type === "tecs";
+    if ((!parametersOpen && !needsTecsReferenceLines) || !detail.data?.run.branch) return;
     let active = true;
     api.runtimeParameters(detail.data.run.branch, detail.data.run.commit_sha)
       .then((catalog) => { if (active) setParameterDefinitions(catalog.parameters); })
       .catch(() => { if (active) setParameterDefinitions([]); });
     return () => { active = false; };
-  }, [detail.data?.run.branch, detail.data?.run.commit_sha, parametersOpen]);
+  }, [completed, detail.data?.run.branch, detail.data?.run.commit_sha, detail.data?.run.scenario_type, parametersOpen]);
+  useEffect(() => {
+    setAcceptanceBandDeg(undefined);
+    if (!completed || !["course_hold", "pitch_hold"].includes(detail.data?.run.scenario_type ?? "")) return;
+    let active = true;
+    loadScenarioSnapshot().then((scenario) => {
+      const acceptance = scenario.definition?.acceptance;
+      if (!active || !acceptance || typeof acceptance !== "object") return;
+      const value = (acceptance as Record<string, unknown>).settling_band_deg;
+      if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+        setAcceptanceBandDeg(value);
+      }
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [completed, detail.data?.run.scenario_type, id, loadScenarioSnapshot]);
   const runVariants = detail.data
     ? detail.data.run.variants?.length
       ? detail.data.run.variants
@@ -91,6 +107,21 @@ export function RunDetailScreen() {
     () => createRunVariantDataSource(id, runVariants, view),
     [id, runVariants.join(","), view],
   );
+  const horizontalReferenceLinesByPlot = useMemo(() => {
+    if (detail.data?.run.scenario_type !== "tecs") return undefined;
+    const byId = new Map(parameterDefinitions.map((item) => [item.id, item]));
+    const reference = (id: string, label: string) => {
+      const definition = byId.get(id);
+      if (!definition) return [];
+      const raw = detail.data?.run.controller_parameters?.[id] ?? definition.default_value;
+      return [{ value: raw * (definition.display_scale ?? 1), label }];
+    };
+    const lines = [
+      ...reference("FW_AIRSPD_MIN", "Minimum safe CAS"),
+      ...reference("FW_AIRSPD_MAX", "Maximum safe CAS"),
+    ];
+    return lines.length ? { "tecs-airspeed": lines } : undefined;
+  }, [detail.data?.run.controller_parameters, detail.data?.run.scenario_type, parameterDefinitions]);
   if (!Number.isInteger(id)) return <main><ErrorPanel message="Invalid run id" /></main>;
   if (detail.loading) return <main><Loading label="Loading run" /></main>;
   if (detail.error || !detail.data) return <main><ErrorPanel message={detail.error ?? "Run not found"} /></main>;
@@ -139,6 +170,8 @@ export function RunDetailScreen() {
       {completed ? <RunAnalysisView
         dataSource={plotDataSource}
         scenarioType={run.scenario_type}
+        acceptanceBandDeg={acceptanceBandDeg}
+        horizontalReferenceLinesByPlot={horizontalReferenceLinesByPlot}
         heading={<div className="section-heading workspace-heading">
           <div><span className="eyebrow">Recorded telemetry</span><h2>Analysis workspace</h2></div>
           <div className="intra-run-view" aria-label="Telemetry view">

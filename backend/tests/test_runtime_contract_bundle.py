@@ -15,6 +15,7 @@ from app.services.controller_parameters import (
 )
 from app.services.runtime_contract import (
     InvalidRuntimeContract,
+    RuntimeCapabilityMismatch,
     RuntimeContractNotFound,
     RuntimeContractReader,
     UnsupportedRuntimeContractVersion,
@@ -291,6 +292,229 @@ def test_parameter_schema_and_scenario_whitelist_are_both_enforced(
         service.resolve_for_variants(tmp_path, ["reference"], {"ROLL_GAIN": 1.0}, [])
 
 
+def test_exact_revision_exposes_course_pitch_and_tecs_capability_and_parameter_metadata(
+    tmp_path: Path,
+) -> None:
+    write_indexed_contract(tmp_path)
+    capability_path = tmp_path / "contract" / "execution" / "capabilities.json"
+    capabilities = json.loads(capability_path.read_text(encoding="utf-8"))
+    capabilities["modes"] = ["compare", "single"]
+    capabilities["scenario_types"] = {
+        "roll_hold": {"mode": "compare", "variants": ["reference", "candidate"]},
+        "course_hold": {
+            "mode": "single",
+            "variants": ["reference"],
+            "primary_supported": False,
+            "reason": "candidate has no Course Hold controller",
+        },
+        "pitch_hold": {
+            "mode": "single",
+            "variants": ["reference"],
+            "primary_supported": False,
+            "reason": "candidate has no Pitch Hold controller",
+        },
+        "tecs": {
+            "mode": "single",
+            "variants": ["reference"],
+            "primary_supported": False,
+            "reason": "candidate has no TECS controller",
+        },
+    }
+    capability_path.write_text(json.dumps(capabilities), encoding="utf-8")
+
+    parameter_path = tmp_path / "contract" / "execution" / "parameters.json"
+    parameters = json.loads(parameter_path.read_text(encoding="utf-8"))
+    parameters["parameters"][0]["scenario_types"] = ["roll_hold"]
+    parameters["parameters"].append(
+        {
+            **parameters["parameters"][0],
+            "id": "NPFG_PERIOD",
+            "display_name": "Lateral guidance response period",
+            "description": "Period that controls the lateral guidance response.",
+            "module": "px4.course",
+            "controller": "Px4CourseController",
+            "group": "PX4 Course / Lateral Guidance",
+            "unit": "s",
+            "minimum": 1.0,
+            "maximum": 100.0,
+            "algorithm_default": 10.0,
+            "default_value": 10.0,
+            "increment": 0.1,
+            "variants": ["reference"],
+            "scenario_types": ["course_hold"],
+            "profiles": {"test-aircraft": {"value": 10.0}},
+        }
+    )
+    pitch_metadata = (
+        ("FW_P_TC", "s", 0.2, 1.0, 0.2, 0.05),
+        ("FW_P_RMAX_POS", "deg/s", 0.0, 180.0, 14.0, 0.5),
+        ("FW_P_RMAX_NEG", "deg/s", 0.0, 180.0, 10.0, 0.5),
+        ("FW_PR_P", "%/rad/s", 0.0, 10.0, 4.5, 0.005),
+        ("FW_PR_I", "%/rad", 0.0, 10.0, 4.5, 0.005),
+        ("FW_PR_D", "%/rad/s", 0.0, 10.0, 0.0, 0.005),
+        ("FW_PR_FF", "%/rad/s", -10.0, 10.0, 1.2, 0.05),
+        ("FW_PR_IMAX", "normalized", 0.0, 1.0, 0.4, 0.05),
+    )
+    for identifier, unit, minimum, maximum, default, increment in pitch_metadata:
+        parameters["parameters"].append(
+            {
+                **parameters["parameters"][0],
+                "id": identifier,
+                "display_name": identifier,
+                "description": f"Exact {identifier} metadata.",
+                "module": "px4.pitch",
+                "controller": "Px4PitchController",
+                "group": "PX4 Pitch",
+                "unit": unit,
+                "minimum": minimum,
+                "maximum": maximum,
+                "algorithm_default": default,
+                "default_value": default,
+                "increment": increment,
+                "variants": ["reference"],
+                "scenario_types": ["pitch_hold"],
+                "profiles": {"test-aircraft": {"value": default}},
+            }
+        )
+    tecs_ids = (
+        "FW_P_LIM_MIN", "FW_P_LIM_MAX", "FW_THR_MIN", "FW_THR_MAX",
+        "FW_THR_TRIM", "FW_AIRSPD_MIN", "FW_AIRSPD_MAX", "FW_T_CLMB_MAX",
+        "FW_T_SINK_MAX", "FW_T_HRATE_P", "FW_T_SPDWEIGHT_P",
+        "FW_T_THR_DAMP", "FW_T_I_GAIN_THR", "FW_T_PTCH_DAMP",
+        "FW_T_I_GAIN_PIT", "FW_T_SEB_R_FF", "FW_T_STE_R_TC",
+        "FW_T_PITCH_RATE", "FW_T_THR_SLEW",
+    )
+    for identifier in tecs_ids:
+        is_angle = identifier in {"FW_P_LIM_MIN", "FW_P_LIM_MAX", "FW_T_PITCH_RATE"}
+        parameters["parameters"].append(
+            {
+                **parameters["parameters"][0],
+                "id": identifier,
+                "display_name": identifier,
+                "description": f"Exact {identifier} metadata.",
+                "module": "px4.tecs",
+                "controller": "Px4TecsController",
+                "group": "PX4 TECS / Energy Loop",
+                "unit": "rad" if is_angle else "ratio",
+                "display_unit": "deg" if is_angle else "ratio",
+                "display_scale": 57.29577951308232 if is_angle else 1.0,
+                "minimum": 0.0,
+                "maximum": 10.0,
+                "algorithm_default": 1.0,
+                "default_value": 1.0,
+                "increment": 0.1,
+                "variants": ["reference"],
+                "scenario_types": ["tecs"],
+                "profiles": {"test-aircraft": {"value": 1.0}},
+            }
+        )
+    parameter_path.write_text(json.dumps(parameters), encoding="utf-8")
+    parameter_set_path = tmp_path / "contract" / "schemas" / "parameter-set.json"
+    parameter_schema = json.loads(parameter_set_path.read_text(encoding="utf-8"))
+    parameter_schema["properties"]["controller_parameters"]["properties"][
+        "NPFG_PERIOD"
+    ] = {"type": "number", "minimum": 1, "maximum": 100}
+    for identifier, _unit, minimum, maximum, _default, _increment in pitch_metadata:
+        parameter_schema["properties"]["controller_parameters"]["properties"][
+            identifier
+        ] = {"type": "number", "minimum": minimum, "maximum": maximum}
+    for identifier in tecs_ids:
+        parameter_schema["properties"]["controller_parameters"]["properties"][
+            identifier
+        ] = {"type": "number", "minimum": 0.0, "maximum": 10.0}
+    parameter_set_path.write_text(json.dumps(parameter_schema), encoding="utf-8")
+
+    reader = RuntimeContractReader()
+    bundle = reader.load_bundle(
+        tmp_path, repository_id=7, commit_sha="d" * 40
+    )
+    course = bundle.capabilities.for_scenario("course_hold")
+    assert course.mode == "single"
+    assert course.variants == ("reference",)
+    definition = next(item for item in bundle.parameters if item.id == "NPFG_PERIOD")
+    assert definition.module == "px4.course"
+    assert definition.group == "PX4 Course / Lateral Guidance"
+    assert definition.minimum == 1.0
+    assert definition.maximum == 100.0
+    assert definition.default_value == 10.0
+    assert definition.unit == "s"
+    assert definition.scenario_types == ["course_hold"]
+    pitch = bundle.capabilities.for_scenario("pitch_hold")
+    assert pitch.mode == "single"
+    assert pitch.variants == ("reference",)
+    pitch_definitions = [
+        item for item in bundle.parameters if item.scenario_types == ["pitch_hold"]
+    ]
+    assert [item.id for item in pitch_definitions] == [
+        item[0] for item in pitch_metadata
+    ]
+    assert all(item.module == "px4.pitch" and item.group == "PX4 Pitch" for item in pitch_definitions)
+    tecs = bundle.capabilities.for_scenario("tecs")
+    assert tecs.mode == "single"
+    assert tecs.variants == ("reference",)
+    tecs_definitions = [
+        item for item in bundle.parameters if item.scenario_types == ["tecs"]
+    ]
+    assert [item.id for item in tecs_definitions] == list(tecs_ids)
+    assert all(item.module == "px4.tecs" for item in tecs_definitions)
+    pitch_limit = next(item for item in tecs_definitions if item.id == "FW_P_LIM_MAX")
+    assert pitch_limit.unit == "rad"
+    assert pitch_limit.display_unit == "deg"
+    assert pitch_limit.display_scale == pytest.approx(57.29577951308232)
+
+    service = RuntimeControllerParameterService(reader)
+    resolved = service.resolve_for_variants(
+        tmp_path,
+        ["reference"],
+        {"NPFG_PERIOD": 12.5},
+        ["NPFG_PERIOD"],
+        "course_hold",
+    )
+    assert resolved.effective == {"NPFG_PERIOD": 12.5}
+    pitch_resolved = service.resolve_for_variants(
+        tmp_path,
+        ["reference"],
+        {"FW_P_TC": 0.3},
+        ["FW_P_TC"],
+        "pitch_hold",
+    )
+    assert pitch_resolved.effective == {"FW_P_TC": 0.3}
+    tecs_resolved = service.resolve_for_variants(
+        tmp_path,
+        ["reference"],
+        {"FW_T_HRATE_P": 1.5},
+        ["FW_T_HRATE_P"],
+        "tecs",
+    )
+    assert tecs_resolved.effective == {"FW_T_HRATE_P": 1.5}
+    with pytest.raises(ControllerParameterError, match="ROLL_GAIN"):
+        service.resolve_for_variants(
+            tmp_path,
+            ["reference"],
+            {"ROLL_GAIN": 1.0},
+            ["ROLL_GAIN"],
+            "course_hold",
+        )
+
+
+def test_authoritative_older_revision_reports_tecs_as_unsupported(
+    tmp_path: Path,
+) -> None:
+    write_indexed_contract(tmp_path)
+    capability_path = tmp_path / "contract" / "execution" / "capabilities.json"
+    capabilities = json.loads(capability_path.read_text(encoding="utf-8"))
+    capabilities["scenario_types"] = {
+        "roll_hold": {"mode": "compare", "variants": ["reference", "candidate"]}
+    }
+    capability_path.write_text(json.dumps(capabilities), encoding="utf-8")
+
+    bundle = RuntimeContractReader().load_bundle(
+        tmp_path, repository_id=8, commit_sha="e" * 40
+    )
+    with pytest.raises(RuntimeCapabilityMismatch, match="tecs"):
+        bundle.capabilities.for_scenario("tecs")
+
+
 def test_missing_indexed_file_is_not_best_effort(tmp_path: Path) -> None:
     write_indexed_contract(tmp_path)
     (tmp_path / "contract" / "telemetry.pb").unlink()
@@ -337,8 +561,87 @@ def test_scenario_to_exact_contract_parameter_and_run_preparation(
         ),
         encoding="utf-8",
     )
+    (scenarios / "course.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "Course contract integration",
+                "scenario_type": "course_hold",
+                "controller_parameters": ["NPFG_PERIOD"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (scenarios / "pitch.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "Pitch contract integration",
+                "scenario_type": "pitch_hold",
+                "controller_parameters": ["FW_P_TC"],
+            }
+        ),
+        encoding="utf-8",
+    )
     runtime = data / "repositories" / "jsb0"
     write_indexed_contract(runtime)
+    capability_path = runtime / "contract" / "execution" / "capabilities.json"
+    capabilities = json.loads(capability_path.read_text(encoding="utf-8"))
+    capabilities["modes"] = ["compare", "single"]
+    capabilities["scenario_types"] = {
+        "roll_hold": {"mode": "compare", "variants": ["reference", "candidate"]},
+        "course_hold": {"mode": "single", "variants": ["reference"]},
+        "pitch_hold": {"mode": "single", "variants": ["reference"]},
+    }
+    capability_path.write_text(json.dumps(capabilities), encoding="utf-8")
+    parameter_path = runtime / "contract" / "execution" / "parameters.json"
+    parameters = json.loads(parameter_path.read_text(encoding="utf-8"))
+    parameters["parameters"].append(
+        {
+            **parameters["parameters"][0],
+            "id": "NPFG_PERIOD",
+            "display_name": "Lateral guidance response period",
+            "module": "px4.course",
+            "group": "PX4 Course / Lateral Guidance",
+            "unit": "s",
+            "minimum": 1.0,
+            "maximum": 100.0,
+            "algorithm_default": 10.0,
+            "default_value": 10.0,
+            "increment": 0.1,
+            "variants": ["reference"],
+            "scenario_types": ["course_hold"],
+            "profiles": {"test-aircraft": {"value": 10.0}},
+        }
+    )
+    parameters["parameters"].append(
+        {
+            **parameters["parameters"][0],
+            "id": "FW_P_TC",
+            "display_name": "Pitch time constant",
+            "description": "Pitch attitude time constant.",
+            "module": "px4.pitch",
+            "controller": "Px4PitchController",
+            "group": "PX4 Pitch",
+            "unit": "s",
+            "minimum": 0.2,
+            "maximum": 1.0,
+            "algorithm_default": 0.2,
+            "default_value": 0.2,
+            "increment": 0.05,
+            "variants": ["reference"],
+            "scenario_types": ["pitch_hold"],
+            "profiles": {"test-aircraft": {"value": 0.2}},
+        }
+    )
+    parameter_path.write_text(json.dumps(parameters), encoding="utf-8")
+    parameter_set_path = runtime / "contract" / "schemas" / "parameter-set.json"
+    parameter_schema = json.loads(parameter_set_path.read_text(encoding="utf-8"))
+    parameter_schema["properties"]["controller_parameters"]["properties"][
+        "NPFG_PERIOD"
+    ] = {"type": "number", "minimum": 1, "maximum": 100}
+    parameter_schema["properties"]["controller_parameters"]["properties"][
+        "FW_P_TC"
+    ] = {"type": "number", "minimum": 0.2, "maximum": 1.0}
+    parameter_set_path.write_text(json.dumps(parameter_schema), encoding="utf-8")
     (runtime / "CMakeLists.txt").write_text(
         "cmake_minimum_required(VERSION 3.16)\nproject(jsb0 NONE)\n",
         encoding="utf-8",
@@ -402,3 +705,37 @@ def test_scenario_to_exact_contract_parameter_and_run_preparation(
         run_root = data / run["output_directory"]
         assert (run_root / "inputs" / "scenario.yml").is_file()
         assert (run_root / "tuning" / "input.yaml").is_file()
+
+        course_response = client.post(
+            "/api/runs",
+            json={
+                "scenario": "course.yaml",
+                "branch": "impl",
+                "controller_parameters": {"NPFG_PERIOD": 12.0},
+            },
+        )
+        assert course_response.status_code == 202, course_response.text
+        course_run = client.get(
+            f"/api/runs/{course_response.json()['id']}"
+        ).json()["run"]
+        assert course_run["scenario_type"] == "course_hold"
+        assert course_run["execution_mode"] == "single"
+        assert course_run["variants"] == ["reference"]
+        assert course_run["controller_parameters"] == {"NPFG_PERIOD": 12.0}
+
+        pitch_response = client.post(
+            "/api/runs",
+            json={
+                "scenario": "pitch.yaml",
+                "branch": "impl",
+                "controller_parameters": {"FW_P_TC": 0.3},
+            },
+        )
+        assert pitch_response.status_code == 202, pitch_response.text
+        pitch_run = client.get(
+            f"/api/runs/{pitch_response.json()['id']}"
+        ).json()["run"]
+        assert pitch_run["scenario_type"] == "pitch_hold"
+        assert pitch_run["execution_mode"] == "single"
+        assert pitch_run["variants"] == ["reference"]
+        assert pitch_run["controller_parameters"] == {"FW_P_TC": 0.3}

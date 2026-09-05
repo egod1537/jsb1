@@ -1,15 +1,21 @@
 import type { PlotPreset } from "../plotTypes";
 import { CUSTOM_PRESET } from "./custom";
+import { COURSE_HOLD_PRESET } from "./courseHold";
+import { PITCH_HOLD_PRESET } from "./pitchHold";
+import { TECS_PRESET } from "./tecs";
 import { DYNAMICS_PRESET } from "./dynamics";
 import { ROLL_HOLD_PRESET } from "./rollHold";
 
-export { CUSTOM_PRESET, DYNAMICS_PRESET, ROLL_HOLD_PRESET };
+export { COURSE_HOLD_PRESET, CUSTOM_PRESET, DYNAMICS_PRESET, PITCH_HOLD_PRESET, ROLL_HOLD_PRESET, TECS_PRESET };
 
-export const ANALYSIS_PRESETS: PlotPreset[] = [ROLL_HOLD_PRESET, DYNAMICS_PRESET, CUSTOM_PRESET];
+export const ANALYSIS_PRESETS: PlotPreset[] = [ROLL_HOLD_PRESET, COURSE_HOLD_PRESET, PITCH_HOLD_PRESET, TECS_PRESET, DYNAMICS_PRESET, CUSTOM_PRESET];
 export const ANALYSIS_PRESET_REGISTRY = new Map(ANALYSIS_PRESETS.map((preset) => [preset.id, preset]));
 
 export const DEFAULT_PRESET_BY_SCENARIO: Readonly<Record<string, string>> = {
   roll_hold: ROLL_HOLD_PRESET.id,
+  course_hold: COURSE_HOLD_PRESET.id,
+  pitch_hold: PITCH_HOLD_PRESET.id,
+  tecs: TECS_PRESET.id,
 };
 
 export interface PresetAvailability {

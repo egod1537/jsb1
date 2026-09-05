@@ -124,16 +124,19 @@ def signal_definition(signal_id: str) -> SignalDefinition | None:
 SIGNAL_CATALOG = LEGACY_SIGNAL_CATALOG
 
 
-def contract_signal_definition(item: RuntimeSignalDefinition) -> SignalDefinition:
+def contract_signal_definition(
+    item: RuntimeSignalDefinition, api_id: str | None = None
+) -> SignalDefinition:
     """Derive JSB1 presentation from contract semantics without signal tables."""
     scale = RAD_TO_DEG if item.unit in {"rad", "rad/s"} else 1.0
     unit = {"rad": "deg", "rad/s": "deg/s"}.get(item.unit, item.unit)
     group = (item.group or item.id.rsplit(".", 1)[0]).split(".")
     category = group[0].replace("_", " ").title()
     subcategory = " ".join(group[1:]).replace("_", " ").title() or "General"
-    display_name = item.api_id.replace("_", " ").title()
+    resolved_id = api_id or item.api_id
+    display_name = resolved_id.rsplit(".", 1)[-1].replace("_", " ").title()
     return SignalDefinition(
-        id=item.api_id,
+        id=resolved_id,
         display_name=display_name,
         symbol="",
         symbol_latex="",

@@ -208,7 +208,9 @@ def _decode_message(
     mapping = catalog.field_mapping(topic=topic, message_name=None)
     if "__value__" in wire:
         candidates = [
-            item.logical_id for item in catalog.signals if item.topic == topic
+            catalog.logical_id_for(item)
+            for item in catalog.signals
+            if item.topic == topic
         ]
         return {candidates[0]: wire["__value__"]} if len(candidates) == 1 else {}
     return {

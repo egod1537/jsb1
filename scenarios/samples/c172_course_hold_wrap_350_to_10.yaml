@@ -1,0 +1,38 @@
+schema_version: 1
+scenario_type: course_hold
+name: C172x PX4 Course Hold Wrap 350 to 10deg
+aircraft: c172x
+controller_parameters:
+  - NPFG_PERIOD
+  - NPFG_DAMPING
+  - FW_R_LIM
+  - FW_PN_R_SLEW_MAX
+initial_condition:
+  latitude_deg: 0
+  longitude_deg: 0
+  altitude_ft: 3000
+  airspeed_kts: 100
+  roll_deg: 0
+  pitch_deg: 0
+  heading_deg: 350
+  p_rad_s: 0
+  q_rad_s: 0
+  r_rad_s: 0
+environment:
+  wind_enabled: false
+trim:
+  enabled: true
+  mode: Full
+simulation:
+  duration_sec: 30
+  dt_sec: 0.01
+events:
+  - time_sec: 5
+    command:
+      type: course_hold
+      course_deg: 10
+acceptance:
+  settling_band_deg: 1
+  settling_time_limit_sec: 20
+  overshoot_limit_deg: 5
+  max_oscillation_cycles: 2

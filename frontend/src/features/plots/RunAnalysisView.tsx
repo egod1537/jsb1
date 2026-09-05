@@ -2,7 +2,7 @@ import { useCallback, useEffect, useReducer, useRef, useState, type ReactNode } 
 import { AnalysisWorkspace } from "./AnalysisWorkspace";
 import { MaximizedWorkspaceDialog } from "./MaximizedWorkspaceDialog";
 import { SharedTimeline } from "./SharedTimeline";
-import type { PlotDataSource, PlotLayoutId, TimelineState } from "./plotTypes";
+import type { HorizontalReferenceLine, PlotDataSource, PlotLayoutId, TimelineState } from "./plotTypes";
 import { createTimeline, timelineReducer } from "./timelineStore";
 import { usePlotWorkspaceController } from "./workspaceState";
 
@@ -15,6 +15,8 @@ interface Props {
   onComparisonViewChange?: (view: "overlay" | "side-by-side") => void;
   heading?: ReactNode;
   inspector?: ReactNode | ((controls: RunAnalysisControls) => ReactNode);
+  acceptanceBandDeg?: number;
+  horizontalReferenceLinesByPlot?: Record<string, HorizontalReferenceLine[]>;
 }
 
 export interface RunAnalysisControls {
@@ -37,6 +39,8 @@ function TimelineAnalysisContent({
   onComparisonViewChange,
   heading,
   inspector,
+  acceptanceBandDeg,
+  horizontalReferenceLinesByPlot,
 }: Props) {
   const [timeline, dispatchTimeline] = useReducer(
     timelineReducer,
@@ -97,6 +101,8 @@ function TimelineAnalysisContent({
     onCursorTimeChange: (time: number | null) => dispatchTimeline({ type: "set-cursor" as const, time }),
     onFullTimeRangeChange: handleFullRangeChange,
     onResetView: resetView,
+    acceptanceBandDeg,
+    horizontalReferenceLinesByPlot,
   };
   const workspace = <AnalysisWorkspace {...workspaceProps} onMaximizeWorkspace={() => setWorkspaceMaximized(true)} />;
   const renderedInspector = typeof inspector === "function"

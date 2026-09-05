@@ -68,8 +68,10 @@ export function selectSupportedControllerParameterDefinitions(
   definitions: ControllerParameterDefinition[],
   requestedIds: string[],
   variants: string[],
+  scenarioType?: string | null,
 ): ControllerParameterDefinition[] {
   const supported = new Map(applicableDefinitions(definitions, variants)
+    .filter((definition) => !scenarioType || !definition.scenario_types?.length || definition.scenario_types.includes(scenarioType))
     .map((definition) => [definition.id, definition]));
   return requestedIds.flatMap((id) => {
     const definition = supported.get(id);
@@ -90,7 +92,7 @@ export function defaultControllerParameterDraftValues(
   variant?: string | string[],
 ): ControllerParameterDraftValues {
   return Object.fromEntries(applicableDefinitions(definitions, variant)
-    .map((item) => [item.id, String(item.default_value)]));
+    .map((item) => [item.id, String(item.default_value * (item.display_scale ?? 1))]));
 }
 
 export function controllerParameterErrors(
@@ -123,14 +125,17 @@ export function parseControllerParameterDrafts(
       return;
     }
     const value = Number(valueText);
+    const scale = item.display_scale ?? 1;
+    const minimum = item.minimum == null ? null : item.minimum * scale;
+    const maximum = item.maximum == null ? null : item.maximum * scale;
     if (!Number.isFinite(value)) {
       errors[item.id] = `${item.id} requires a finite value`;
-    } else if (item.minimum != null && value < item.minimum) {
-      errors[item.id] = `${item.id} must be at least ${item.minimum}`;
-    } else if (item.maximum != null && value > item.maximum) {
-      errors[item.id] = `${item.id} must be at most ${item.maximum}`;
+    } else if (minimum != null && value < minimum) {
+      errors[item.id] = `${item.id} must be at least ${minimum}`;
+    } else if (maximum != null && value > maximum) {
+      errors[item.id] = `${item.id} must be at most ${maximum}`;
     } else {
-      values[item.id] = value;
+      values[item.id] = value / scale;
     }
   });
   return { values, errors };

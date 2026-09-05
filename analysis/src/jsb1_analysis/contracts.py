@@ -59,7 +59,10 @@ class SignalCatalog:
             raise UnsupportedTelemetryContract(
                 f"unsupported telemetry contract version: {self.contract_version}"
             )
-        logical_ids = [item.logical_id for item in self.signals]
+        full_ids = [item.id for item in self.signals]
+        if len(full_ids) != len(set(full_ids)):
+            raise TelemetryContractError("signal ids must be unique")
+        logical_ids = [self.logical_id_for(item) for item in self.signals]
         if len(logical_ids) != len(set(logical_ids)):
             raise TelemetryContractError("logical signal ids must be unique")
         missing_topics = sorted({item.topic for item in self.signals} - set(self.topics))
@@ -79,7 +82,24 @@ class SignalCatalog:
         )
 
     def by_logical_id(self) -> dict[str, SignalDefinition]:
-        return {item.logical_id: item for item in self.signals}
+        return {self.logical_id_for(item): item for item in self.signals}
+
+    def logical_id_for(self, item: SignalDefinition) -> str:
+        leaf = item.logical_id
+        namespace = item.id.rsplit(".", 1)[0]
+        if namespace.startswith("tecs"):
+            return item.id
+        if namespace in {"course", "pitch", "pitch_rate"} and leaf in {
+            "commanded",
+            "actual",
+            "error",
+        }:
+            return item.id
+        return (
+            item.id
+            if sum(candidate.logical_id == leaf for candidate in self.signals) > 1
+            else leaf
+        )
 
     def variant_for_topic(self, topic: str) -> str | None:
         metadata = self.topics.get(topic, {})
@@ -102,7 +122,7 @@ class SignalCatalog:
             if message_name is not None and value.get("message") == message_name
         }
         return {
-            item.field: item.logical_id
+            item.field: self.logical_id_for(item)
             for item in self.signals
             if item.topic == topic or item.topic in compatible_topics
         }

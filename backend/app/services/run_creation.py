@@ -138,6 +138,7 @@ class RunCreationService:
                 if bundle is not None
                 else await asyncio.to_thread(self.variants.capabilities, worktree)
             )
+            capability = capability.for_scenario(scenario.scenario_type)
             if not capability.authoritative or not capability.variants:
                 raise ValueError(
                     "Selected JSB0 revision has no authoritative headless execution capability"
@@ -175,6 +176,7 @@ class RunCreationService:
                 run_variants,
                 command.controller_parameters or {},
                 scenario.controller_parameters,
+                scenario.scenario_type,
             )
             effective_parameters = parameter_resolution.effective
             parameter_overrides = parameter_resolution.overrides

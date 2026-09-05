@@ -213,10 +213,13 @@ class RuntimeParameterDefinition(BaseModel):
     controller: str | None = None
     type: str = "number"
     unit: str | None = None
+    display_unit: str | None = None
+    display_scale: float = 1.0
     minimum: float | None = None
     maximum: float | None = None
     increment: float | None = None
     variants: list[str] = Field(default_factory=list)
+    scenario_types: list[str] = Field(default_factory=list)
     aircraft: list[str] = Field(default_factory=list)
     algorithm_default: float | None = None
     default_value: float
@@ -289,6 +292,7 @@ class RuntimeVariantsResponse(BaseModel):
     commit_sha: str
     mode: str = "single"
     variants: list[str]
+    scenario_types: dict[str, dict[str, object]] = Field(default_factory=dict)
 
 
 class ComparisonCreate(BaseModel):

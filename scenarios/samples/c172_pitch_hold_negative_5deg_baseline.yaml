@@ -1,0 +1,54 @@
+schema_version: 1
+scenario_type: pitch_hold
+name: Contract Pitch Hold 0 to -5deg
+aircraft: c172x
+controller_parameters:
+  - FW_P_TC
+  - FW_P_RMAX_POS
+  - FW_P_RMAX_NEG
+  - FW_PR_P
+  - FW_PR_I
+  - FW_PR_D
+  - FW_PR_FF
+  - FW_PR_IMAX
+
+initial_condition:
+  latitude_deg: 0
+  longitude_deg: 0
+  altitude_ft: 3000
+  airspeed_kts: 80
+  roll_deg: 0
+  pitch_deg: 0
+  heading_deg: 0
+  p_rad_s: 0
+  q_rad_s: 0
+  r_rad_s: 0
+
+environment:
+  wind_enabled: false
+
+trim:
+  enabled: true
+  mode: Full
+
+simulation:
+  duration_sec: 30
+  dt_sec: 0.01
+
+events:
+  - time_sec: 0
+    command:
+      type: pitch_hold
+      pitch_deg: 0
+  - time_sec: 15
+    command:
+      type: pitch_hold
+      pitch_deg: -5
+
+acceptance:
+  settling_band_deg: 0.2
+  settling_time_limit_sec: 3
+  overshoot_limit_deg: 0.5
+  max_oscillation_cycles: 1
+  steady_state_error_limit_deg: 0.1
+  steady_state_rate_limit_deg_s: 0.1

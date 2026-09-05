@@ -70,7 +70,7 @@ class TelemetryQueryService:
         for name in list(values):
             contract_item = catalog.by_api_id().get(name) if catalog else None
             definition = (
-                contract_signal_definition(contract_item)
+                contract_signal_definition(contract_item, name)
                 if contract_item is not None
                 else signal_definition(name)
             )
@@ -120,7 +120,7 @@ class TelemetryQueryService:
     ) -> SignalMetadata:
         contract_item = catalog.by_api_id().get(name) if catalog else None
         definition = (
-            contract_signal_definition(contract_item)
+            contract_signal_definition(contract_item, name)
             if contract_item is not None
             else signal_definition(name)
         )

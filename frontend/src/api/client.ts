@@ -1,4 +1,4 @@
-import type { AvailableSignalsResponse, Branch, Build, BuildVersion, CreateRunInput, CreateRunResponse, RollHoldAnalysis, RollHoldAnalysisVariants, RunDetail, RuntimeControllerParameters, RuntimeRepository, RuntimeVariants, RunSummary, ScenarioCatalogEntry, ScenarioCreateResponse, ScenarioInspectionCatalogEntry, ScenarioInspectionDetail, ScenarioInspectionSource, ScenarioSyncResult, ScenarioSyncStatus, ScenarioValidationResult, SignalResponse } from "../types/api";
+import type { AvailableSignalsResponse, Branch, Build, BuildVersion, CourseHoldAnalysisVariants, CreateRunInput, CreateRunResponse, PitchHoldAnalysisVariants, RollHoldAnalysis, RollHoldAnalysisVariants, RunDetail, RuntimeControllerParameters, RuntimeRepository, RuntimeVariants, RunSummary, ScenarioCatalogEntry, ScenarioCreateResponse, ScenarioInspectionCatalogEntry, ScenarioInspectionDetail, ScenarioInspectionSource, ScenarioSyncResult, ScenarioSyncStatus, ScenarioValidationResult, SignalResponse, TecsAnalysisVariants } from "../types/api";
 
 export class ApiError extends Error {
   constructor(
@@ -78,6 +78,9 @@ export const api = {
   runs: (query = "") => request<RunSummary[]>(`/api/runs${query}`),
   run: (id: number) => request<RunDetail>(`/api/runs/${id}`),
   rollHoldAnalysis: (id: number) => request<RollHoldAnalysisVariants | RollHoldAnalysis>(`/api/runs/${id}/analysis/roll-hold`),
+  courseHoldAnalysis: (id: number) => request<CourseHoldAnalysisVariants>(`/api/runs/${id}/analysis/course-hold`),
+  pitchHoldAnalysis: (id: number) => request<PitchHoldAnalysisVariants>(`/api/runs/${id}/analysis/pitch-hold`),
+  tecsAnalysis: (id: number) => request<TecsAnalysisVariants>(`/api/runs/${id}/analysis/tecs`),
   createRun: (input: CreateRunInput) =>
     request<CreateRunResponse>("/api/runs", {
       method: "POST",

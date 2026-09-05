@@ -15,7 +15,7 @@ import { IconNames } from "@blueprintjs/icons";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { ApiError, api } from "../../api/client";
-import type { Branch, ControllerParameterDefinition, ScenarioCatalogEntry, ScenarioSyncStatus } from "../../types/api";
+import type { Branch, ControllerParameterDefinition, RuntimeVariants, ScenarioCatalogEntry, ScenarioSyncStatus } from "../../types/api";
 import { uniqueBranches } from "../../utils/branches";
 import { ControllerParameterConfigureDialog, controllerParameterErrors, selectSupportedControllerParameterDefinitions } from "../parameters";
 import { ScenarioViewerDialog } from "../scenarios";
@@ -45,6 +45,8 @@ export function NewRunForm({ onClose, initialBranch }: Props) {
   const [syncStatus, setSyncStatus] = useState<ScenarioSyncStatus | null>(null);
   const [variants, setVariants] = useState<string[]>([]);
   const [headlessMode, setHeadlessMode] = useState("");
+  const [defaultCapability, setDefaultCapability] = useState<{ mode: string; variants: string[] } | null>(null);
+  const [scenarioCapabilities, setScenarioCapabilities] = useState<RuntimeVariants["scenario_types"]>({});
   const [variantsLoading, setVariantsLoading] = useState(false);
   const [variantError, setVariantError] = useState<string | null>(null);
   const [branchPreviewCommit, setBranchPreviewCommit] = useState<string | null>(null);
@@ -117,6 +119,8 @@ export function NewRunForm({ onClose, initialBranch }: Props) {
           && Boolean(parameterResult.value.commit_sha)
           && capabilityResult.value.commit_sha !== parameterResult.value.commit_sha
         ) {
+          setDefaultCapability(null);
+          setScenarioCapabilities({});
           setVariants([]);
           setHeadlessMode("");
           setParameterDefinitions([]);
@@ -129,15 +133,21 @@ export function NewRunForm({ onClose, initialBranch }: Props) {
           const capability = capabilityResult.value;
           supported = Array.isArray(capability.variants) ? capability.variants : [];
           if (!capability.mode || supported.length === 0) {
+            setDefaultCapability(null);
+            setScenarioCapabilities({});
             setVariants([]);
             setHeadlessMode("");
             setVariantError("Selected JSB0 revision has no headless execution capability");
           } else {
+            setDefaultCapability({ mode: capability.mode, variants: supported });
+            setScenarioCapabilities(capability.scenario_types ?? {});
             setVariants(supported);
             setHeadlessMode(capability.mode);
             setBranchPreviewCommit(capability.commit_sha);
           }
         } else {
+          setDefaultCapability(null);
+          setScenarioCapabilities({});
           setVariants([]);
           setHeadlessMode("");
           setVariantError(capabilityResult.reason instanceof Error
@@ -182,13 +192,29 @@ export function NewRunForm({ onClose, initialBranch }: Props) {
     () => scenarios.find((item) => `${item.source}:${item.id}` === scenario) ?? null,
     [scenario, scenarios],
   );
+  useEffect(() => {
+    if (!defaultCapability || variantsLoading) return;
+    const scenarioType = selectedScenario?.scenario_type;
+    const specific = scenarioType
+      ? scenarioCapabilities?.[scenarioType]
+      : undefined;
+    if (scenarioType && Object.keys(scenarioCapabilities ?? {}).length > 0 && !specific) {
+      setVariants([]);
+      setHeadlessMode("");
+      setVariantError(`Selected JSB0 revision does not support ${scenarioType}`);
+      return;
+    }
+    setVariantError(null);
+    setVariants(specific?.variants ?? defaultCapability.variants);
+    setHeadlessMode(specific?.mode ?? defaultCapability.mode);
+  }, [defaultCapability, scenarioCapabilities, selectedScenario, variantsLoading]);
   const requestedParameterIds = useMemo(
     () => selectedScenario?.controller_parameters ?? [],
     [selectedScenario],
   );
   const allowedParameterDefinitions = useMemo(
-    () => selectSupportedControllerParameterDefinitions(parameterDefinitions, requestedParameterIds, variants),
-    [parameterDefinitions, requestedParameterIds, variants],
+    () => selectSupportedControllerParameterDefinitions(parameterDefinitions, requestedParameterIds, variants, selectedScenario?.scenario_type),
+    [parameterDefinitions, requestedParameterIds, selectedScenario?.scenario_type, variants],
   );
   const unsupportedParameterIds = useMemo(() => {
     if (

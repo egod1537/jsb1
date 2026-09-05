@@ -1,0 +1,70 @@
+schema_version: 1
+scenario_type: tecs
+name: Contract TECS altitude plus 50 m
+aircraft: c172x
+controller_parameters:
+  - FW_P_LIM_MIN
+  - FW_P_LIM_MAX
+  - FW_THR_MIN
+  - FW_THR_MAX
+  - FW_THR_TRIM
+  - FW_AIRSPD_MIN
+  - FW_AIRSPD_MAX
+  - FW_T_CLMB_MAX
+  - FW_T_SINK_MAX
+  - FW_T_HRATE_P
+  - FW_T_SPDWEIGHT_P
+  - FW_T_THR_DAMP
+  - FW_T_I_GAIN_THR
+  - FW_T_PTCH_DAMP
+  - FW_T_I_GAIN_PIT
+  - FW_T_SEB_R_FF
+  - FW_T_STE_R_TC
+  - FW_T_PITCH_RATE
+  - FW_T_THR_SLEW
+
+initial_condition:
+  latitude_deg: 0
+  longitude_deg: 0
+  altitude_ft: 3000
+  airspeed_kts: 80
+  roll_deg: 0
+  pitch_deg: 0
+  heading_deg: 0
+  p_rad_s: 0
+  q_rad_s: 0
+  r_rad_s: 0
+
+environment:
+  wind_enabled: false
+
+trim:
+  enabled: true
+  mode: Full
+
+simulation:
+  duration_sec: 70
+  dt_sec: 0.01
+
+events:
+  - time_sec: 0
+    command:
+      type: tecs
+      altitude_agl_m: 914.4
+      airspeed_cas_mps: 41.15552
+  - time_sec: 5
+    command:
+      type: tecs
+      altitude_agl_m: 964.4
+      airspeed_cas_mps: 41.15552
+
+acceptance:
+  altitude_error_limit_m: 2
+  airspeed_error_limit_mps: 0.3
+  altitude_overshoot_limit_m: 5
+  settling_time_limit_sec: 50
+  max_pitch_oscillation_deg: 1
+  max_throttle_oscillation: 0.05
+  max_sustained_throttle_saturation_sec: 0.1
+  max_sustained_elevator_saturation_sec: 0.1
+  require_safe_airspeed: true

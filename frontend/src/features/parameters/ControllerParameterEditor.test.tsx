@@ -10,6 +10,7 @@ import {
   parseControllerParameterDrafts,
   selectSupportedControllerParameterDefinitions,
 } from "./ControllerParameterEditor";
+import { runtimeParameterViewModel } from "./parameterViewModel";
 
 const definitions = [{
   id: "FW_RR_P",
@@ -44,6 +45,71 @@ const rollHoldDefinitions = [
   { id: "FW_RR_FF", display_name: "Roll Rate Feed Forward", module: "flight.roll", default_value: 0.5, minimum: 0, maximum: 10, variants: ["baseline"] },
   { id: "FW_RR_IMAX", display_name: "Roll Integrator Limit", module: "flight.roll", default_value: 0.2, minimum: 0, maximum: 1, variants: ["baseline"] },
 ];
+
+const courseHoldDefinitions = [
+  { id: "NPFG_PERIOD", display_name: "Guidance Period", group: "PX4 Course / Lateral Guidance", unit: "s", default_value: 10, minimum: 1, maximum: 100, increment: 0.1, variants: ["baseline"], scenario_types: ["course_hold"] },
+  { id: "NPFG_DAMPING", display_name: "Guidance Damping", group: "PX4 Course / Lateral Guidance", unit: "dimensionless", default_value: 0.7, minimum: 0.1, maximum: 1, increment: 0.01, variants: ["baseline"], scenario_types: ["course_hold"] },
+  { id: "FW_R_LIM", display_name: "Roll Limit", group: "PX4 Course / Lateral Guidance", unit: "deg", default_value: 20, minimum: 0, maximum: 75, increment: 0.5, variants: ["baseline"], scenario_types: ["course_hold"] },
+  { id: "FW_PN_R_SLEW_MAX", display_name: "Roll Setpoint Slew", group: "PX4 Course / Lateral Guidance", unit: "deg/s", default_value: 30, minimum: 0, maximum: 180, increment: 1, variants: ["baseline"], scenario_types: ["course_hold"] },
+  { ...rollHoldDefinitions[0], scenario_types: ["roll_hold"] },
+];
+
+const pitchHoldDefinitions = [
+  ["FW_P_TC", "s", 0.2, 1, 0.2, 0.05],
+  ["FW_P_RMAX_POS", "deg/s", 0, 180, 14, 0.5],
+  ["FW_P_RMAX_NEG", "deg/s", 0, 180, 10, 0.5],
+  ["FW_PR_P", "%/rad/s", 0, 10, 4.5, 0.005],
+  ["FW_PR_I", "%/rad", 0, 10, 4.5, 0.005],
+  ["FW_PR_D", "%/rad/s", 0, 10, 0, 0.005],
+  ["FW_PR_FF", "%/rad/s", -10, 10, 1.2, 0.05],
+  ["FW_PR_IMAX", "normalized", 0, 1, 0.4, 0.05],
+].map(([id, unit, minimum, maximum, defaultValue, increment]) => ({
+  id: String(id),
+  display_name: String(id),
+  group: "PX4 Pitch",
+  module: "px4.pitch",
+  unit: String(unit),
+  minimum: Number(minimum),
+  maximum: Number(maximum),
+  default_value: Number(defaultValue),
+  increment: Number(increment),
+  variants: ["baseline"],
+  scenario_types: ["pitch_hold"],
+}));
+
+const tecsIds = [
+  "FW_P_LIM_MIN", "FW_P_LIM_MAX", "FW_THR_MIN", "FW_THR_MAX",
+  "FW_AIRSPD_MIN", "FW_AIRSPD_MAX", "FW_T_CLMB_MAX", "FW_T_SINK_MAX",
+  "FW_T_HRATE_P", "FW_T_SPDWEIGHT_P", "FW_T_THR_DAMP", "FW_T_I_GAIN_THR",
+  "FW_T_PTCH_DAMP", "FW_T_I_GAIN_PIT", "FW_T_SEB_R_FF", "FW_T_STE_R_TC",
+  "FW_T_PITCH_RATE", "FW_T_THR_SLEW", "FW_THR_TRIM",
+] as const;
+
+const tecsDefinitions = tecsIds.map((id) => {
+  const group = ["FW_P_LIM_MIN", "FW_P_LIM_MAX", "FW_THR_MIN", "FW_THR_MAX", "FW_AIRSPD_MIN", "FW_AIRSPD_MAX"].includes(id)
+    ? "PX4 TECS / Envelope"
+    : ["FW_T_CLMB_MAX", "FW_T_SINK_MAX"].includes(id)
+      ? "PX4 TECS / Performance"
+      : ["FW_T_PITCH_RATE", "FW_T_THR_SLEW"].includes(id)
+        ? "PX4 TECS / Slew"
+        : id === "FW_THR_TRIM" ? "PX4 TECS / Trim" : "PX4 TECS / Energy Loop";
+  const angle = id === "FW_P_LIM_MIN" || id === "FW_P_LIM_MAX" || id === "FW_T_PITCH_RATE";
+  return {
+    id,
+    display_name: id,
+    group,
+    module: "px4.tecs",
+    unit: angle ? "rad" : "ratio",
+    display_unit: angle ? (id === "FW_T_PITCH_RATE" ? "deg/s" : "deg") : "ratio",
+    display_scale: angle ? 180 / Math.PI : 1,
+    minimum: 0,
+    maximum: angle ? Math.PI / 4 : 10,
+    default_value: angle ? Math.PI / 9 : 1,
+    increment: angle ? Math.PI / 360 : 0.1,
+    variants: ["baseline"],
+    scenario_types: ["tecs"],
+  };
+});
 
 afterEach(cleanup);
 
@@ -81,6 +147,85 @@ describe("ControllerParameterEditor", () => {
       ["FW_R_TC", "FW_RR_P", "FW_RR_I", "FW_RR_D", "FW_RR_FF", "FW_RR_IMAX"],
       ["baseline", "primary"],
     )).toHaveLength(6);
+  });
+
+  it("builds the Course editor from revision metadata and scenario applicability", () => {
+    const selected = selectSupportedControllerParameterDefinitions(
+      courseHoldDefinitions,
+      ["NPFG_PERIOD", "NPFG_DAMPING", "FW_R_LIM", "FW_PN_R_SLEW_MAX", "FW_R_TC"],
+      ["baseline"],
+      "course_hold",
+    );
+    expect(selected.map((item) => item.id)).toEqual([
+      "NPFG_PERIOD",
+      "NPFG_DAMPING",
+      "FW_R_LIM",
+      "FW_PN_R_SLEW_MAX",
+    ]);
+    expect(controllerParameterCategories(selected, "baseline")).toEqual([{
+      id: "px4-course-lateral-guidance",
+      label: "PX4 Course / Lateral Guidance",
+    }]);
+    expect(selected.find((item) => item.id === "FW_R_LIM")).toMatchObject({
+      unit: "deg",
+      minimum: 0,
+      maximum: 75,
+      default_value: 20,
+      increment: 0.5,
+    });
+  });
+
+  it("builds all eight Pitch parameters only from exact revision metadata", () => {
+    const selected = selectSupportedControllerParameterDefinitions(
+      [...pitchHoldDefinitions, ...courseHoldDefinitions],
+      [...pitchHoldDefinitions.map((item) => item.id), "NPFG_PERIOD"],
+      ["baseline"],
+      "pitch_hold",
+    );
+    expect(selected.map((item) => item.id)).toEqual(
+      pitchHoldDefinitions.map((item) => item.id),
+    );
+    expect(controllerParameterCategories(selected, "baseline")).toEqual([{
+      id: "px4-pitch",
+      label: "PX4 Pitch",
+    }]);
+    expect(selected.find((item) => item.id === "FW_P_RMAX_POS")).toMatchObject({
+      unit: "deg/s",
+      minimum: 0,
+      maximum: 180,
+      default_value: 14,
+      increment: 0.5,
+    });
+  });
+
+  it("builds all 19 TECS parameters and converts display units from contract metadata", () => {
+    const selected = selectSupportedControllerParameterDefinitions(
+      [...tecsDefinitions, ...pitchHoldDefinitions],
+      [...tecsIds, "FW_P_TC"],
+      ["baseline"],
+      "tecs",
+    );
+    expect(selected.map((item) => item.id)).toEqual([...tecsIds]);
+    expect(controllerParameterCategories(selected, "baseline").map((item) => item.label)).toEqual([
+      "PX4 TECS / Envelope",
+      "PX4 TECS / Performance",
+      "PX4 TECS / Energy Loop",
+      "PX4 TECS / Slew",
+      "PX4 TECS / Trim",
+    ]);
+    const pitchLimit = selected.find((item) => item.id === "FW_P_LIM_MAX")!;
+    expect(runtimeParameterViewModel(pitchLimit)).toMatchObject({
+      unit: "deg",
+      minimum: 0,
+      maximum: 45,
+      defaultValue: 20,
+      step: 0.5,
+    });
+    const parsed = parseControllerParameterDrafts(
+      [pitchLimit], { FW_P_LIM_MAX: "25" }, ["baseline"],
+    );
+    expect(parsed.errors).toEqual({});
+    expect(parsed.values.FW_P_LIM_MAX).toBeCloseTo(25 * Math.PI / 180);
   });
 });
 

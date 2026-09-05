@@ -8,8 +8,11 @@ import { PLOT_TEMPLATES, validatePlotTemplateRegistry } from "./plotTemplates";
 import { PLOT_LAYOUTS, createPresetPlots, signalUnion } from "./plotTypes";
 import {
   ANALYSIS_PRESETS,
+  COURSE_HOLD_PRESET,
   DYNAMICS_PRESET,
+  PITCH_HOLD_PRESET,
   ROLL_HOLD_PRESET,
+  TECS_PRESET,
   defaultPresetForScenario,
   presetAvailability,
   validatePresetRegistry,
@@ -27,6 +30,7 @@ vi.mock("../../components/TimeSeriesChart", () => ({
     showLegend,
     yAxisMin,
     yAxisMax,
+    series,
   }: {
     title: string;
     timeline: { visibleStart: number; visibleEnd: number; cursorTime: number | null; selectedRange: [number, number] | null };
@@ -35,6 +39,7 @@ vi.mock("../../components/TimeSeriesChart", () => ({
     showLegend?: boolean;
     yAxisMin?: number;
     yAxisMax?: number;
+    series: Array<{ name: string; values: number[] }>;
   }) => <div
     data-testid="synchronized-chart"
     aria-label={`${title} chart`}
@@ -46,6 +51,7 @@ vi.mock("../../components/TimeSeriesChart", () => ({
     data-show-legend={String(showLegend ?? true)}
     data-y-min={yAxisMin ?? "auto"}
     data-y-max={yAxisMax ?? "auto"}
+    data-series={JSON.stringify(series)}
   >
     <button aria-label={`zoom ${title}`} onClick={() => onVisibleRangeChange(2, 4)}>zoom</button>
     <button aria-label={`cursor ${title}`} onClick={() => onCursorTimeChange(3)}>cursor</button>
@@ -173,6 +179,46 @@ describe("plot workspace model", () => {
     expect(signalUnion(plots)).toEqual(["aileron", "commanded_roll", "commanded_roll_rate", "roll", "roll_rate"]);
   });
 
+  it("defines the contract-driven PX4 Course Hold preset", () => {
+    const plots = createPresetPlots(COURSE_HOLD_PRESET);
+    expect(COURSE_HOLD_PRESET.name).toBe("PX4 Course Hold");
+    expect(COURSE_HOLD_PRESET.recommendedLayout).toBe("2x2");
+    expect(plots.map((plot) => plot.title)).toEqual([
+      "Course Tracking",
+      "Course Error",
+      "Roll Setpoint Tracking",
+      "Ground Speed / Guidance",
+    ]);
+    expect(plots[0]).toMatchObject({
+      angularAware: true,
+      acceptanceBandSignal: "course.commanded",
+    });
+    expect(defaultPresetForScenario("course_hold").id).toBe("px4-course-hold");
+  });
+
+  it("defines the contract-driven PX4 Pitch Hold preset", () => {
+    const plots = createPresetPlots(PITCH_HOLD_PRESET);
+    expect(PITCH_HOLD_PRESET.name).toBe("PX4 Pitch Hold");
+    expect(PITCH_HOLD_PRESET.recommendedLayout).toBe("2x2");
+    expect(plots.map((plot) => plot.title)).toEqual([
+      "Pitch Tracking",
+      "Pitch Rate Tracking",
+      "Pitch Error / Rate Error",
+      "Elevator / Saturation",
+    ]);
+    expect(plots[0].acceptanceBandSignal).toBe("pitch.commanded");
+    expect(defaultPresetForScenario("pitch_hold").id).toBe("px4-pitch-hold");
+  });
+
+  it("defines the six-panel contract-driven PX4 TECS preset", () => {
+    expect(defaultPresetForScenario("tecs").id).toBe("px4-tecs");
+    expect(TECS_PRESET.name).toBe("PX4 TECS");
+    expect(TECS_PRESET.recommendedLayout).toBe("2x3");
+    expect(TECS_PRESET.plots).toHaveLength(6);
+    expect(signalUnion(TECS_PRESET.plots)).toContain("tecs.altitude.target");
+    expect(signalUnion(TECS_PRESET.plots)).toContain("tecs.underspeed_active");
+  });
+
   it("maps backend contract signal metadata into the categorized view model", () => {
     const catalog = CONTRACT_SIGNALS.map(normalizeSignalMetadata);
     expect(catalog.map((signal) => signal.id).sort()).toEqual([
@@ -213,6 +259,59 @@ describe("plot workspace model", () => {
   it("maps roll_hold to Roll Hold and unknown scenarios to Dynamics", () => {
     expect(defaultPresetForScenario("roll_hold").id).toBe("roll-hold");
     expect(defaultPresetForScenario("formation_flight").id).toBe("dynamics");
+  });
+
+  it("unwraps displayed Course degrees and renders the scenario acceptance band", async () => {
+    const time = [0, 1, 2, 3];
+    const courseTelemetry: SignalResponse = {
+      time,
+      series: {
+        "course.commanded": [10, 10, 10, 10],
+        "course.actual": [350, 355, 1, 5],
+        "course.error": [20, 15, 9, 5],
+        roll_setpoint: [0, 5, 8, 4],
+        roll: [0, 2, 6, 5],
+        ground_speed: [50, 50, 50, 50],
+      },
+      units: {
+        "course.commanded": "deg",
+        "course.actual": "deg",
+        "course.error": "deg",
+        roll_setpoint: "deg",
+        roll: "deg",
+        ground_speed: "m/s",
+      },
+      source_points: 4,
+      returned_points: 4,
+    };
+    const source = {
+      key: "course-run",
+      loadSignals: vi.fn().mockResolvedValue(courseTelemetry),
+      listSignals: vi.fn().mockResolvedValue(
+        Object.keys(courseTelemetry.series).map((name) => ({
+          name,
+          display_name: name.split(".").at(-1)?.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase()),
+          unit: courseTelemetry.units[name],
+        })),
+      ),
+    };
+    render(<AnalysisWorkspace
+      dataSource={source}
+      scenarioType="course_hold"
+      acceptanceBandDeg={1}
+    />);
+    const chart = await screen.findByLabelText("Course Tracking chart");
+    const series = JSON.parse(chart.getAttribute("data-series") ?? "[]") as Array<{
+      name: string;
+      values: number[];
+    }>;
+    expect(series.find((item) => item.name === "Actual")?.values).toEqual([
+      -10, -5, 1, 5,
+    ]);
+    expect(series.find((item) => item.name === "Commanded + acceptance")?.values)
+      .toEqual([11, 11, 11, 11]);
+    expect(series.find((item) => item.name === "Commanded - acceptance")?.values)
+      .toEqual([9, 9, 9, 9]);
   });
 
   it("keeps the registry unique and rejects malformed definitions", () => {

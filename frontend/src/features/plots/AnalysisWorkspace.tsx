@@ -17,6 +17,7 @@ import {
   arrangePlots,
   signalUnion,
   type PlotDataSource,
+  type HorizontalReferenceLine,
   type PlotConfig,
   type PlotLayoutId,
   type PlotPreset,
@@ -40,6 +41,8 @@ interface Props {
   onCursorTimeChange: (time: number | null) => void;
   onFullTimeRangeChange: (start: number, end: number) => void;
   onResetView: () => void;
+  acceptanceBandDeg?: number;
+  horizontalReferenceLinesByPlot?: Record<string, HorizontalReferenceLine[]>;
 }
 
 type DiscoveryStatus = "loading" | "ready" | "unavailable";
@@ -69,6 +72,8 @@ export function AnalysisWorkspace({
   onCursorTimeChange,
   onFullTimeRangeChange,
   onResetView,
+  acceptanceBandDeg,
+  horizontalReferenceLinesByPlot,
 }: Props) {
   const recommendedPreset = defaultPresetForScenario(scenarioType);
   const { layout, activePresetId, presetModified, plots, layoutItems } = workspace;
@@ -332,6 +337,8 @@ export function AnalysisWorkspace({
         }}
         resolveSignal={dataSource.resolveSignal}
         hasSignal={dataSource.hasSignal}
+        acceptanceBandDeg={acceptanceBandDeg}
+        horizontalReferenceLinesByPlot={horizontalReferenceLinesByPlot}
       />
     </div>
     <MaximizedPlotDialog
@@ -344,6 +351,8 @@ export function AnalysisWorkspace({
       onClose={() => setExpandedPlotId(null)}
       resolveSignal={dataSource.resolveSignal}
       hasSignal={dataSource.hasSignal}
+      acceptanceBandDeg={acceptanceBandDeg}
+      horizontalReferenceLines={expandedPlot ? horizontalReferenceLinesByPlot?.[sourcePlotId(expandedPlot.id)] : undefined}
     />
     <PlotSettingsDialog
       mode={plotSettingsTarget?.mode ?? "create"}

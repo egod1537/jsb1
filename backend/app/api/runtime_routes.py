@@ -156,4 +156,5 @@ async def runtime_variants(
         commit_sha=revision.commit_sha,
         mode=capability.mode,
         variants=list(capability.variants),
+        scenario_types=capability.scenario_types or {},
     )
